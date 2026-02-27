@@ -24,7 +24,7 @@ final class YouTubePlayerBridge {
     var onReady: (() -> Void)?
     var onStateChange: ((PlayerState) -> Void)?
     var onTimeUpdate: ((Double, Double) -> Void)?
-    var onError: ((String) -> Void)?
+    var onError: ((Int) -> Void)?
 
     fileprivate var commandSink: ((Command) -> Void)?
 
@@ -64,8 +64,8 @@ final class YouTubePlayerBridge {
         onTimeUpdate?(max(current, 0), max(duration, 0))
     }
 
-    fileprivate func emitError(_ message: String) {
-        onError?(message)
+    fileprivate func emitError(_ code: Int) {
+        onError?(code)
     }
 }
 
@@ -128,8 +128,9 @@ private final class YouTubePlayerCoordinator: NSObject, WKScriptMessageHandler, 
         controller.add(self, name: messageHandlerName)
 
         let initialID = pendingVideoID ?? currentVideoID ?? ""
-        let html = Self.playerHTML(initialVideoID: initialID)
-        webView.loadHTMLString(html, baseURL: URL(string: "https://www.youtube.com"))
+        let identityURL = Self.embedderIdentityURL()
+        let html = Self.playerHTML(initialVideoID: initialID, embedderIdentityURL: identityURL)
+        webView.loadHTMLString(html, baseURL: identityURL)
     }
 
     func updateVideoID(_ videoID: String) {
@@ -221,8 +222,16 @@ private final class YouTubePlayerCoordinator: NSObject, WKScriptMessageHandler, 
             bridge.emitTime(current: current, duration: duration)
         case .error:
             let code = body["value"] as? Int ?? -1
-            bridge.emitError("YouTube player error (\(code)).")
+            bridge.emitError(code)
         }
+    }
+
+    private static func embedderIdentityURL() -> URL {
+        let fallback = URL(string: "https://reactwatch.app")!
+        guard let bundleID = Bundle.main.bundleIdentifier?.lowercased(), !bundleID.isEmpty else {
+            return fallback
+        }
+        return URL(string: "https://\(bundleID)") ?? fallback
     }
 
     private static func mapState(_ value: Int) -> YouTubePlayerBridge.PlayerState {
@@ -247,13 +256,15 @@ private final class YouTubePlayerCoordinator: NSObject, WKScriptMessageHandler, 
             .replacingOccurrences(of: "'", with: "\\'")
     }
 
-    private static func playerHTML(initialVideoID: String) -> String {
+    private static func playerHTML(initialVideoID: String, embedderIdentityURL: URL) -> String {
         let escapedVideoID = escapeForSingleQuotedJS(sanitizeVideoID(initialVideoID))
+        let escapedOrigin = escapeForSingleQuotedJS(embedderIdentityURL.absoluteString)
         return """
         <!doctype html>
         <html>
         <head>
             <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+            <meta name="referrer" content="strict-origin-when-cross-origin">
             <style>
                 html, body, #player {
                     margin: 0;
@@ -270,7 +281,7 @@ private final class YouTubePlayerCoordinator: NSObject, WKScriptMessageHandler, 
             <script>
                 let reactwatchPlayer = null;
                 let reactwatchPendingVideoId = '\(escapedVideoID)';
-                let reactwatchReady = false;
+                const reactwatchOrigin = '\(escapedOrigin)';
 
                 function reactwatchSend(kind, payload) {
                     const message = Object.assign({ kind: kind }, payload || {});
@@ -283,12 +294,15 @@ private final class YouTubePlayerCoordinator: NSObject, WKScriptMessageHandler, 
                         playerVars: {
                             autoplay: 0,
                             controls: 0,
+                            enablejsapi: 1,
                             rel: 0,
                             fs: 0,
                             iv_load_policy: 3,
                             modestbranding: 1,
                             disablekb: 1,
-                            playsinline: 1
+                            playsinline: 1,
+                            origin: reactwatchOrigin,
+                            widget_referrer: reactwatchOrigin
                         },
                         events: {
                             onReady: onReactwatchPlayerReady,

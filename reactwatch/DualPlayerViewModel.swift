@@ -712,8 +712,25 @@ final class DualPlayerViewModel: ObservableObject {
             self.synchronizeStateFromTick()
         }
 
-        reactionYouTubeBridge.onError = { [weak self] message in
-            self?.alertMessage = message
+        reactionYouTubeBridge.onError = { [weak self] code in
+            self?.alertMessage = self?.messageForYouTubeError(code)
+        }
+    }
+
+    private func messageForYouTubeError(_ code: Int) -> String {
+        switch code {
+        case 2:
+            return "YouTube could not load this URL (invalid video ID)."
+        case 5:
+            return "YouTube playback failed in this WebView session."
+        case 100:
+            return "This YouTube video is unavailable or private."
+        case 101, 150:
+            return "The video owner has disabled embedding for this YouTube video."
+        case 153:
+            return "YouTube rejected the embed request (missing app referrer identity). Please retry after reopening the app."
+        default:
+            return "YouTube player error (\(code))."
         }
     }
 
