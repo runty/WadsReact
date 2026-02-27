@@ -1,0 +1,18 @@
+# macOS
+.DS_Store
+
+# Xcode user-specific files
+**/xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+
+# Build outputs
+build/
+DerivedData/
+
+# SwiftPM
+.swiftpm/
+
+# Editors
+.idea/
+.vscode/

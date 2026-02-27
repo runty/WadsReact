@@ -1,0 +1,667 @@
+import AVKit
+import SwiftUI
+import UniformTypeIdentifiers
+
+struct ContentView: View {
+    @StateObject private var model = DualPlayerViewModel()
+    @State private var importerPresented = false
+    @State private var activeImportKind: DualPlayerViewModel.VideoKind = .primary
+    @State private var isTheaterMode = false
+    @State private var syncStepSeconds = 0.5
+    @State private var isScrubbing = false
+    @State private var scrubValue = 0.0
+    @State private var pipOrigin = CGPoint(x: 24, y: 24)
+    @State private var pipSize = CGSize(width: 360, height: 202)
+    @State private var pipDragStartOrigin: CGPoint?
+    @State private var pipResizeStartSize: CGSize?
+    @State private var hasInitializedPiP = false
+    @State private var pipControlsVisible = true
+    @State private var pipControlsAutoHideTicket = 0
+    @State private var isDraggingPiP = false
+    @State private var isResizingPiP = false
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+
+    private let pipPadding = 16.0
+    private let pipMinSize = CGSize(width: 180, height: 101)
+    private let pipDefaultSize = CGSize(width: 360, height: 202)
+
+    private var isManipulatingPiP: Bool {
+        isDraggingPiP || isResizingPiP
+    }
+
+    private var importTypes: [UTType] {
+        var types: [UTType] = [.movie]
+        if let mkv = UTType(filenameExtension: "mkv") {
+            types.append(mkv)
+        }
+        return types
+    }
+
+    private var scrubberRange: ClosedRange<Double> {
+        0...max(model.durationSeconds, 1)
+    }
+
+    private var displayedTime: Double {
+        isScrubbing ? scrubValue : model.currentSeconds
+    }
+
+    private var syncStatusText: String {
+        if abs(model.reactionOffsetSeconds) < 0.01 {
+            return "Reaction is aligned with the show."
+        }
+
+        if model.reactionOffsetSeconds > 0 {
+            return String(format: "Reaction is delayed by %.2f seconds.", model.reactionOffsetSeconds)
+        }
+
+        return String(format: "Reaction is advanced by %.2f seconds.", abs(model.reactionOffsetSeconds))
+    }
+
+    private func secondsLabel(_ value: Double) -> String {
+        let magnitude = value < 1 ? String(format: "%.1f", value) : String(format: "%.0f", value)
+        let unit = value == 1 ? "second" : "seconds"
+        return "\(magnitude) \(unit)"
+    }
+
+    private func percentLabel(_ value: Double) -> String {
+        "\(Int((value * 100).rounded()))%"
+    }
+
+    var body: some View {
+        VStack(spacing: isTheaterMode ? 0 : 16) {
+            if !isTheaterMode {
+                header
+            }
+
+            if isTheaterMode {
+                players
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                players
+            }
+
+            if !isTheaterMode {
+                transport
+                settings
+                subtitleControls
+                volumeControls
+            }
+        }
+        .padding(isTheaterMode ? 0 : 16)
+        .alert(
+            "Unable to Open Video",
+            isPresented: Binding(
+                get: { model.alertMessage != nil },
+                set: { isPresented in
+                    if !isPresented {
+                        model.alertMessage = nil
+                    }
+                }
+            ),
+            actions: {
+                Button("OK", role: .cancel) {}
+            },
+            message: {
+                Text(model.alertMessage ?? "")
+            }
+        )
+        .fileImporter(
+            isPresented: $importerPresented,
+            allowedContentTypes: importTypes,
+            allowsMultipleSelection: false
+        ) { result in
+            model.importSelection(result, kind: activeImportKind)
+        }
+    }
+
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("ReactWatch")
+                .font(.title.bold())
+            Text("Play a show/movie and reaction video together in sync.")
+                .foregroundStyle(.secondary)
+
+            HStack(spacing: 12) {
+                Button {
+                    activeImportKind = .primary
+                    importerPresented = true
+                } label: {
+                    Label("Choose Show/Movie", systemImage: "film")
+                }
+
+                Button {
+                    activeImportKind = .reaction
+                    importerPresented = true
+                } label: {
+                    Label("Choose Reaction", systemImage: "person.2")
+                }
+            }
+
+            Button {
+                isTheaterMode.toggle()
+                if isTheaterMode {
+                    hasInitializedPiP = false
+                }
+            } label: {
+                Label(
+                    isTheaterMode ? "Exit Theatre Mode" : "Theatre Mode",
+                    systemImage: isTheaterMode ? "rectangle.grid.1x2" : "rectangle.inset.filled.and.person.filled"
+                )
+            }
+            .buttonStyle(.bordered)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var players: some View {
+        Group {
+            if isTheaterMode {
+                GeometryReader { geometry in
+                    ZStack(alignment: .topLeading) {
+                        theaterMainPlayer(in: geometry.size)
+
+                        if model.hasReactionVideo {
+                            theaterReactionPiP(in: geometry.size)
+                        }
+                    }
+                    .onAppear {
+                        initializePiP(in: geometry.size)
+                    }
+                    .onChange(of: geometry.size) { _, newSize in
+                        initializePiP(in: newSize)
+                        clampPiPToBounds(in: newSize)
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                splitPlayers
+            }
+        }
+    }
+
+    private var splitPlayers: some View {
+        Group {
+            if horizontalSizeClass == .compact {
+                VStack(spacing: 12) {
+                    videoPane(
+                        title: "Show / Movie",
+                        fileName: model.primaryTitle,
+                        player: model.primaryPlayer,
+                        loaded: model.hasPrimaryVideo
+                    )
+
+                    videoPane(
+                        title: "Reaction",
+                        fileName: model.reactionTitle,
+                        player: model.reactionPlayer,
+                        loaded: model.hasReactionVideo
+                    )
+                }
+            } else {
+                HStack(spacing: 12) {
+                    videoPane(
+                        title: "Show / Movie",
+                        fileName: model.primaryTitle,
+                        player: model.primaryPlayer,
+                        loaded: model.hasPrimaryVideo
+                    )
+
+                    videoPane(
+                        title: "Reaction",
+                        fileName: model.reactionTitle,
+                        player: model.reactionPlayer,
+                        loaded: model.hasReactionVideo
+                    )
+                }
+            }
+        }
+    }
+
+    private func theaterMainHeight(in container: CGSize) -> CGFloat {
+        let ratio = max(model.primaryVideoAspectRatio, 0.1)
+        let fitHeight = container.width / ratio
+        return min(container.height, fitHeight)
+    }
+
+    private func theaterMainPlayer(in container: CGSize) -> some View {
+        ZStack {
+            VideoPlayer(player: model.primaryPlayer)
+
+            if !model.hasPrimaryVideo {
+                Rectangle()
+                    .fill(.black.opacity(0.55))
+                Text("No show/movie selected")
+                    .foregroundStyle(.white)
+            }
+        }
+        .frame(width: container.width, height: theaterMainHeight(in: container), alignment: .top)
+        .overlay(alignment: .topTrailing) {
+            if isTheaterMode {
+                Button {
+                    isTheaterMode = false
+                } label: {
+                    Label("Exit Theatre Mode", systemImage: "xmark.circle.fill")
+                }
+                .labelStyle(.iconOnly)
+                .buttonStyle(.plain)
+                .font(.title2)
+                .padding(12)
+                .foregroundStyle(.white.opacity(0.9))
+            }
+        }
+    }
+
+    private func theaterReactionPiP(in container: CGSize) -> some View {
+        PlayerSurfaceView(player: model.reactionPlayer)
+            .frame(width: pipSize.width, height: pipSize.height)
+            .background(.black)
+            .overlay(alignment: .topLeading) {
+                Circle()
+                    .fill(.ultraThinMaterial)
+                    .frame(width: 26, height: 26)
+                .overlay(
+                    Image(systemName: "hand.draw.fill")
+                        .font(.caption2)
+                )
+                .padding(8)
+                .opacity(pipControlsVisible ? 1 : 0)
+            }
+            .overlay(alignment: .bottomTrailing) {
+                Circle()
+                    .fill(.ultraThinMaterial)
+                    .frame(width: 26, height: 26)
+                .overlay(
+                    Image(systemName: "arrow.up.left.and.arrow.down.right")
+                        .font(.caption2)
+                )
+                .padding(8)
+                .contentShape(Rectangle())
+                .gesture(pipResizeGesture(in: container))
+                .opacity(pipControlsVisible ? 1 : 0)
+            }
+            .contentShape(Rectangle())
+            .gesture(pipDragGesture(in: container))
+            .simultaneousGesture(TapGesture().onEnded {
+                revealPiPControls()
+            })
+            .onAppear {
+                revealPiPControls()
+            }
+            .task(id: pipControlsAutoHideTicket) {
+                guard isTheaterMode else { return }
+
+                try? await Task.sleep(for: .seconds(2.0))
+                guard !Task.isCancelled else { return }
+                guard !isManipulatingPiP else { return }
+
+                await MainActor.run {
+                    withAnimation(.easeOut(duration: 0.25)) {
+                        pipControlsVisible = false
+                    }
+                }
+            }
+            .position(
+                x: pipOrigin.x + (pipSize.width / 2),
+                y: pipOrigin.y + (pipSize.height / 2)
+            )
+    }
+
+    private func videoPane(title: String, fileName: String, player: AVPlayer, loaded: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.headline)
+            Text(fileName)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+
+            ZStack {
+                VideoPlayer(player: player)
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+
+                if !loaded {
+                    RoundedRectangle(cornerRadius: 12)
+                        .fill(.black.opacity(0.55))
+                    Text("No video selected")
+                        .foregroundStyle(.white)
+                }
+            }
+            .frame(minHeight: 220)
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private func initializePiP(in container: CGSize) {
+        guard isTheaterMode, !hasInitializedPiP else {
+            return
+        }
+
+        let size = clampedPiPSize(pipDefaultSize, in: container)
+        pipSize = size
+        pipOrigin = CGPoint(
+            x: container.width - size.width - pipPadding,
+            y: container.height - size.height - pipPadding
+        )
+        hasInitializedPiP = true
+        revealPiPControls()
+    }
+
+    private func clampPiPToBounds(in container: CGSize) {
+        let size = clampedPiPSize(pipSize, in: container)
+        pipSize = size
+        pipOrigin = clampedPiPOrigin(pipOrigin, size: size, in: container)
+    }
+
+    private func clampedPiPSize(_ proposed: CGSize, in container: CGSize) -> CGSize {
+        let maxWidth = max(pipMinSize.width, container.width - (pipPadding * 2))
+        let maxHeight = max(pipMinSize.height, container.height - (pipPadding * 2))
+        return CGSize(
+            width: min(max(proposed.width, pipMinSize.width), maxWidth),
+            height: min(max(proposed.height, pipMinSize.height), maxHeight)
+        )
+    }
+
+    private func clampedPiPOrigin(_ proposed: CGPoint, size: CGSize, in container: CGSize) -> CGPoint {
+        let maxX = max(pipPadding, container.width - size.width - pipPadding)
+        let maxY = max(pipPadding, container.height - size.height - pipPadding)
+        return CGPoint(
+            x: min(max(proposed.x, pipPadding), maxX),
+            y: min(max(proposed.y, pipPadding), maxY)
+        )
+    }
+
+    private func pipDragGesture(in container: CGSize) -> some Gesture {
+        DragGesture()
+            .onChanged { value in
+                guard !isResizingPiP else {
+                    return
+                }
+
+                if pipDragStartOrigin == nil {
+                    pipDragStartOrigin = pipOrigin
+                    isDraggingPiP = true
+                    revealPiPControls()
+                }
+
+                let start = pipDragStartOrigin ?? pipOrigin
+                let proposed = CGPoint(
+                    x: start.x + value.translation.width,
+                    y: start.y + value.translation.height
+                )
+
+                pipOrigin = clampedPiPOrigin(proposed, size: pipSize, in: container)
+            }
+            .onEnded { _ in
+                pipDragStartOrigin = nil
+                isDraggingPiP = false
+                revealPiPControls()
+            }
+    }
+
+    private func pipResizeGesture(in container: CGSize) -> some Gesture {
+        DragGesture()
+            .onChanged { value in
+                if pipResizeStartSize == nil {
+                    pipResizeStartSize = pipSize
+                    isResizingPiP = true
+                    revealPiPControls()
+                }
+
+                let start = pipResizeStartSize ?? pipSize
+                let proposed = CGSize(
+                    width: start.width + value.translation.width,
+                    height: start.height + value.translation.height
+                )
+
+                let clamped = clampedPiPSize(proposed, in: container)
+                pipSize = clamped
+                pipOrigin = clampedPiPOrigin(pipOrigin, size: clamped, in: container)
+            }
+            .onEnded { _ in
+                pipResizeStartSize = nil
+                isResizingPiP = false
+                revealPiPControls()
+            }
+    }
+
+    private func revealPiPControls() {
+        withAnimation(.easeOut(duration: 0.2)) {
+            pipControlsVisible = true
+        }
+        pipControlsAutoHideTicket += 1
+    }
+
+    private var transport: some View {
+        VStack(spacing: 10) {
+            Slider(
+                value: Binding(
+                    get: { displayedTime },
+                    set: { value in
+                        scrubValue = value
+                    }
+                ),
+                in: scrubberRange,
+                onEditingChanged: { editing in
+                    isScrubbing = editing
+                    if editing {
+                        scrubValue = model.currentSeconds
+                    } else {
+                        model.seek(to: scrubValue)
+                    }
+                }
+            )
+
+            HStack {
+                Text(model.formatTime(displayedTime))
+                    .monospacedDigit()
+                Spacer()
+                Text(model.formatTime(model.durationSeconds))
+                    .monospacedDigit()
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+
+            HStack(spacing: 20) {
+                Button {
+                    model.skip(by: -10)
+                } label: {
+                    Image(systemName: "gobackward.10")
+                }
+                .buttonStyle(.bordered)
+
+                Button {
+                    model.playPause()
+                } label: {
+                    Image(systemName: model.isPlaying ? "pause.fill" : "play.fill")
+                        .font(.title2)
+                }
+                .buttonStyle(.borderedProminent)
+
+                Button {
+                    model.skip(by: 10)
+                } label: {
+                    Image(systemName: "goforward.10")
+                }
+                .buttonStyle(.bordered)
+            }
+        }
+    }
+
+    private var settings: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Sync Offset")
+                .font(.headline)
+
+            Text("Use this when the reaction has an intro or starts late. Positive values delay the reaction.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            HStack(spacing: 12) {
+                Text(String(format: "%+.2f s", model.reactionOffsetSeconds))
+                    .monospacedDigit()
+                    .frame(width: 70, alignment: .leading)
+
+                Slider(
+                    value: Binding(
+                        get: { model.reactionOffsetSeconds },
+                        set: { value in
+                            model.setReactionOffset(to: value)
+                        }
+                    ),
+                    in: model.minReactionOffsetSeconds...model.maxReactionOffsetSeconds,
+                    step: 0.05
+                )
+            }
+
+            HStack(spacing: 8) {
+                Button {
+                    model.nudgeReactionOffset(by: -syncStepSeconds)
+                } label: {
+                    Label("Earlier", systemImage: "chevron.backward.circle.fill")
+                }
+                .buttonStyle(.borderedProminent)
+
+                Button {
+                    model.nudgeReactionOffset(by: syncStepSeconds)
+                } label: {
+                    Label("Later", systemImage: "chevron.forward.circle.fill")
+                }
+                .buttonStyle(.borderedProminent)
+
+                Menu {
+                    ForEach([0.1, 0.5, 1.0, 5.0, 15.0], id: \.self) { step in
+                        Button {
+                            syncStepSeconds = step
+                        } label: {
+                            if abs(syncStepSeconds - step) < 0.001 {
+                                Label(secondsLabel(step), systemImage: "checkmark")
+                            } else {
+                                Text(secondsLabel(step))
+                            }
+                        }
+                    }
+                } label: {
+                    Label("Step: \(secondsLabel(syncStepSeconds))", systemImage: "slider.horizontal.3")
+                }
+                .buttonStyle(.bordered)
+            }
+
+            HStack(spacing: 8) {
+                Button("Match Current Frames") {
+                    model.matchOffsetToCurrentFrames()
+                }
+                .buttonStyle(.bordered)
+                .disabled(!model.canMatchCurrentFrames)
+
+                Button("Reset Offset") {
+                    model.resetReactionOffset()
+                }
+                .buttonStyle(.bordered)
+            }
+
+            Text(syncStatusText)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            Text("Tip: Negative means reaction plays earlier, positive means it plays later.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var volumeControls: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Audio")
+                .font(.headline)
+
+            HStack(spacing: 10) {
+                Label("Show", systemImage: "film")
+                    .frame(width: 80, alignment: .leading)
+
+                Slider(
+                    value: Binding(
+                        get: { model.primaryVolume },
+                        set: { value in
+                            model.setPrimaryVolume(to: value)
+                        }
+                    ),
+                    in: 0...1
+                )
+
+                Text(percentLabel(model.primaryVolume))
+                    .monospacedDigit()
+                    .frame(width: 44, alignment: .trailing)
+
+                Button {
+                    model.togglePrimaryMute()
+                } label: {
+                    Image(systemName: model.primaryVolume <= 0.001 ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                }
+                .buttonStyle(.bordered)
+            }
+
+            HStack(spacing: 10) {
+                Label("Reaction", systemImage: "person.2")
+                    .frame(width: 80, alignment: .leading)
+
+                Slider(
+                    value: Binding(
+                        get: { model.reactionVolume },
+                        set: { value in
+                            model.setReactionVolume(to: value)
+                        }
+                    ),
+                    in: 0...1
+                )
+
+                Text(percentLabel(model.reactionVolume))
+                    .monospacedDigit()
+                    .frame(width: 44, alignment: .trailing)
+
+                Button {
+                    model.toggleReactionMute()
+                } label: {
+                    Image(systemName: model.reactionVolume <= 0.001 ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                }
+                .buttonStyle(.bordered)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var subtitleControls: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Subtitles (Main Video)")
+                .font(.headline)
+
+            Picker(
+                "Subtitle Track",
+                selection: Binding(
+                    get: { model.selectedSubtitleID },
+                    set: { id in
+                        model.selectSubtitle(id: id)
+                    }
+                )
+            ) {
+                ForEach(model.subtitleChoices) { choice in
+                    Text(choice.title).tag(choice.id)
+                }
+            }
+            .pickerStyle(.menu)
+            .disabled(!model.hasPrimaryVideo)
+
+            if model.hasPrimaryVideo, model.subtitleChoices.count <= 1 {
+                Text("No subtitle tracks detected in this file.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
