@@ -19,11 +19,13 @@ final class DualPlayerViewModel: ObservableObject {
 
     let primaryPlayer = AVPlayer()
     let reactionPlayer = AVPlayer()
+    let reactionYouTubeBridge = YouTubePlayerBridge()
 
     @Published var primaryTitle = "No show/movie selected"
     @Published var reactionTitle = "No reaction selected"
     @Published var hasPrimaryVideo = false
     @Published var hasReactionVideo = false
+    @Published var reactionYouTubeVideoID: String?
     @Published var currentSeconds = 0.0
     @Published var durationSeconds = 1.0
     @Published var isPlaying = false
@@ -39,6 +41,10 @@ final class DualPlayerViewModel: ObservableObject {
     let maxReactionOffsetSeconds = 600.0
     let maxVolume = 1.0
 
+    var isReactionYouTube: Bool {
+        reactionYouTubeVideoID != nil
+    }
+
     var canMatchCurrentFrames: Bool {
         hasPrimaryVideo && hasReactionVideo
     }
@@ -49,18 +55,24 @@ final class DualPlayerViewModel: ObservableObject {
     private var securityScopedURLs: [URL] = []
     private var currentLegibleGroup: AVMediaSelectionGroup?
     private var legibleOptionByID: [String: AVMediaSelectionOption] = [:]
+    private var reactionYouTubeState: YouTubePlayerBridge.PlayerState = .unstarted
+    private var reactionYouTubeCurrentSeconds = 0.0
+    private var reactionYouTubeDurationSeconds = 0.0
+    private var lastYouTubeCorrectionDate = Date.distantPast
 
     private let observerInterval = CMTime(seconds: 0.1, preferredTimescale: 600)
     private let seekTimescale: CMTimeScale = 600
-    private let startLeadTimeSeconds = 0.15
     private let hardResyncThresholdSeconds = 0.45
     private let rateCorrectionThresholdSeconds = 0.03
     private let maxRateAdjustment = 0.06
     private let rateCorrectionGain = 0.35
     private let correctionSeekTolerance = CMTime(seconds: 0.02, preferredTimescale: 600)
+    private let youTubeResyncThresholdSeconds = 0.25
+    private let minimumYouTubeCorrectionInterval = 0.4
 
     init() {
         configurePlayersForSync()
+        configureYouTubeBridge()
         applyVolumeSettings()
         installObservers()
     }
@@ -115,6 +127,11 @@ final class DualPlayerViewModel: ObservableObject {
             guard let self else { return }
 
             do {
+                if kind == .reaction, let videoID = self.extractYouTubeVideoID(from: url) {
+                    self.loadYouTubeReaction(videoID: videoID, title: url.absoluteString)
+                    return
+                }
+
                 let resolvedURL = try await self.resolvePlayableURLIfNeeded(from: url)
                 await self.loadVideo(at: resolvedURL, kind: kind)
             } catch {
@@ -137,7 +154,7 @@ final class DualPlayerViewModel: ObservableObject {
         } else if hasPrimaryVideo {
             primaryPlayer.playImmediately(atRate: 1.0)
         } else if hasReactionVideo {
-            reactionPlayer.playImmediately(atRate: 1.0)
+            playReaction()
         }
 
         isPlaying = true
@@ -145,7 +162,7 @@ final class DualPlayerViewModel: ObservableObject {
 
     func pause() {
         primaryPlayer.pause()
-        reactionPlayer.pause()
+        pauseReaction()
         isPlaying = false
     }
 
@@ -158,15 +175,7 @@ final class DualPlayerViewModel: ObservableObject {
         currentSeconds = clamped
 
         if hasPrimaryVideo, hasReactionVideo {
-            if isPlaying {
-                seekBothPlayers(primarySeconds: clamped, resumePlayback: true)
-            } else {
-                let primaryTarget = CMTime(seconds: clamped, preferredTimescale: seekTimescale)
-                primaryPlayer.seek(to: primaryTarget, toleranceBefore: .zero, toleranceAfter: .zero)
-
-                let reactionTarget = reactionTime(forPrimarySeconds: clamped)
-                reactionPlayer.seek(to: reactionTarget, toleranceBefore: .zero, toleranceAfter: .zero)
-            }
+            seekBothPlayers(primarySeconds: clamped, resumePlayback: isPlaying)
             return
         }
 
@@ -176,31 +185,34 @@ final class DualPlayerViewModel: ObservableObject {
         }
 
         if hasReactionVideo {
-            let reactionTarget = reactionTime(forPrimarySeconds: clamped)
-            reactionPlayer.seek(to: reactionTarget, toleranceBefore: .zero, toleranceAfter: .zero)
+            if hasPrimaryVideo {
+                seekReactionToMatchPrimaryTime(clamped)
+            } else {
+                seekReaction(to: clamped)
+            }
         }
 
         if isPlaying {
             if hasPrimaryVideo {
                 primaryPlayer.playImmediately(atRate: 1.0)
             } else if hasReactionVideo {
-                reactionPlayer.playImmediately(atRate: 1.0)
+                playReaction()
             }
         }
     }
 
     private func seekBothPlayers(primarySeconds: Double, resumePlayback: Bool) {
         let primaryTarget = CMTime(seconds: max(primarySeconds, 0), preferredTimescale: seekTimescale)
-        let reactionTarget = reactionTime(forPrimarySeconds: primarySeconds)
+        let reactionTarget = reactionSeconds(forPrimarySeconds: primarySeconds)
 
         Task { [weak self] in
             guard let self else { return }
             await self.seekPlayer(self.primaryPlayer, to: primaryTarget)
-            await self.seekPlayer(self.reactionPlayer, to: reactionTarget)
+            self.seekReaction(to: reactionTarget)
 
             guard resumePlayback else { return }
             self.primaryPlayer.playImmediately(atRate: 1.0)
-            self.reactionPlayer.playImmediately(atRate: 1.0)
+            self.playReaction()
             self.isPlaying = true
         }
     }
@@ -219,12 +231,12 @@ final class DualPlayerViewModel: ObservableObject {
         }
 
         let primarySeconds = hasPrimaryVideo ? primaryPlayer.currentTime().seconds : 0
-        let reactionTarget = reactionTime(forPrimarySeconds: primarySeconds)
+        let reactionTarget = reactionSeconds(forPrimarySeconds: primarySeconds)
 
         if hasPrimaryVideo, isPrimaryActuallyPlaying, isReactionActuallyPlaying {
             startSynchronizedPlayback(primarySeconds: primarySeconds)
         } else {
-            reactionPlayer.seek(to: reactionTarget, toleranceBefore: .zero, toleranceAfter: .zero)
+            seekReaction(to: reactionTarget)
         }
     }
 
@@ -278,7 +290,7 @@ final class DualPlayerViewModel: ObservableObject {
         }
 
         let primarySeconds = primaryPlayer.currentTime().seconds
-        let reactionSeconds = reactionPlayer.currentTime().seconds
+        let reactionSeconds = currentReactionSeconds
 
         guard primarySeconds.isFinite, reactionSeconds.isFinite else {
             return
@@ -338,6 +350,7 @@ final class DualPlayerViewModel: ObservableObject {
             hasPrimaryVideo = true
             await refreshPrimarySubtitleChoices(for: item)
         case .reaction:
+            clearYouTubeReactionState()
             reactionPlayer.replaceCurrentItem(with: item)
             reactionTitle = url.lastPathComponent
             hasReactionVideo = true
@@ -414,6 +427,10 @@ final class DualPlayerViewModel: ObservableObject {
             return
         }
 
+        synchronizeStateFromTick()
+    }
+
+    private func synchronizeStateFromTick() {
         updateTimeline()
         refreshPlayingState()
         adjustOffsetForSinglePlayerPause()
@@ -431,19 +448,23 @@ final class DualPlayerViewModel: ObservableObject {
             if isPrimaryActuallyPlaying || !isReactionActuallyPlaying {
                 sourceTime = primaryPlayer.currentTime().seconds
             } else {
-                sourceTime = reactionPlayer.currentTime().seconds
+                sourceTime = currentReactionSeconds
             }
         } else if hasPrimaryVideo {
             sourceTime = primaryPlayer.currentTime().seconds
         } else {
-            sourceTime = reactionPlayer.currentTime().seconds
+            sourceTime = currentReactionSeconds
         }
 
         currentSeconds = sourceTime.isFinite ? max(sourceTime, 0) : 0
 
-        let sourceDuration = hasPrimaryVideo
-            ? primaryPlayer.currentItem?.duration.seconds
-            : reactionPlayer.currentItem?.duration.seconds
+        let sourceDuration: Double? = if hasPrimaryVideo {
+            primaryPlayer.currentItem?.duration.seconds
+        } else if isReactionYouTube {
+            reactionYouTubeDurationSeconds
+        } else {
+            reactionPlayer.currentItem?.duration.seconds
+        }
 
         if let sourceDuration, sourceDuration.isFinite, sourceDuration > 0 {
             durationSeconds = sourceDuration
@@ -458,14 +479,29 @@ final class DualPlayerViewModel: ObservableObject {
         }
 
         let primarySeconds = primaryPlayer.currentTime().seconds
-        let currentReactionSeconds = reactionPlayer.currentTime().seconds
+        let reactionSecondsNow = currentReactionSeconds
 
-        guard primarySeconds.isFinite, currentReactionSeconds.isFinite else {
+        guard primarySeconds.isFinite, reactionSecondsNow.isFinite else {
             return
         }
 
-        let desiredReactionSeconds = max(0, primarySeconds - reactionOffsetSeconds)
-        let drift = desiredReactionSeconds - currentReactionSeconds
+        let desiredReactionSeconds = reactionSeconds(forPrimarySeconds: primarySeconds)
+        let drift = desiredReactionSeconds - reactionSecondsNow
+
+        if isReactionYouTube {
+            guard abs(drift) >= youTubeResyncThresholdSeconds else {
+                return
+            }
+
+            let now = Date()
+            guard now.timeIntervalSince(lastYouTubeCorrectionDate) >= minimumYouTubeCorrectionInterval else {
+                return
+            }
+
+            seekReaction(to: desiredReactionSeconds)
+            lastYouTubeCorrectionDate = now
+            return
+        }
 
         if abs(drift) >= hardResyncThresholdSeconds {
             let target = CMTime(seconds: desiredReactionSeconds, preferredTimescale: seekTimescale)
@@ -489,7 +525,12 @@ final class DualPlayerViewModel: ObservableObject {
     }
 
     private var isReactionActuallyPlaying: Bool {
-        reactionPlayer.timeControlStatus == .playing
+        switch reactionPlaybackStatus {
+        case .playing:
+            return true
+        case .paused, .waiting:
+            return false
+        }
     }
 
     private func refreshPlayingState() {
@@ -501,8 +542,8 @@ final class DualPlayerViewModel: ObservableObject {
             return
         }
 
-        let primaryStatus = primaryPlayer.timeControlStatus
-        let reactionStatus = reactionPlayer.timeControlStatus
+        let primaryStatus = primaryPlaybackStatus
+        let reactionStatus = reactionPlaybackStatus
 
         guard (primaryStatus == .playing && reactionStatus == .paused)
             || (primaryStatus == .paused && reactionStatus == .playing) else {
@@ -510,7 +551,7 @@ final class DualPlayerViewModel: ObservableObject {
         }
 
         let primarySeconds = primaryPlayer.currentTime().seconds
-        let reactionSeconds = reactionPlayer.currentTime().seconds
+        let reactionSeconds = currentReactionSeconds
 
         guard primarySeconds.isFinite, reactionSeconds.isFinite else {
             return
@@ -520,7 +561,7 @@ final class DualPlayerViewModel: ObservableObject {
     }
 
     private func configurePlayersForSync() {
-        // Required for deterministic start times when using setRate(_:time:atHostTime:).
+        // Favor immediate starts and let drift correction keep players aligned.
         primaryPlayer.automaticallyWaitsToMinimizeStalling = false
         reactionPlayer.automaticallyWaitsToMinimizeStalling = false
     }
@@ -532,29 +573,14 @@ final class DualPlayerViewModel: ObservableObject {
 
         let currentPrimary = primaryPlayer.currentTime().seconds
         let basePrimarySeconds = primarySeconds ?? (currentPrimary.isFinite ? max(currentPrimary, 0) : 0)
-        let primaryTime = CMTime(seconds: basePrimarySeconds, preferredTimescale: seekTimescale)
-        let reactionTime = reactionTime(forPrimarySeconds: basePrimarySeconds)
-
-        if usesNetworkBackedStream(primaryPlayer.currentItem) || usesNetworkBackedStream(reactionPlayer.currentItem) {
-            // Host-time rate scheduling is less reliable for remote adaptive streams during scrubs.
-            primaryPlayer.seek(to: primaryTime, toleranceBefore: .zero, toleranceAfter: .zero)
-            reactionPlayer.seek(to: reactionTime, toleranceBefore: .zero, toleranceAfter: .zero)
-            primaryPlayer.playImmediately(atRate: 1.0)
-            reactionPlayer.playImmediately(atRate: 1.0)
-            return
-        }
-
-        let hostNow = CMClockGetTime(CMClockGetHostTimeClock())
-        let startHost = CMTimeAdd(
-            hostNow,
-            CMTime(seconds: startLeadTimeSeconds, preferredTimescale: seekTimescale)
-        )
-
-        primaryPlayer.setRate(1.0, time: primaryTime, atHostTime: startHost)
-        reactionPlayer.setRate(1.0, time: reactionTime, atHostTime: startHost)
+        seekBothPlayers(primarySeconds: basePrimarySeconds, resumePlayback: true)
     }
 
     private func normalizeReactionRateIfNeeded() {
+        guard !isReactionYouTube else {
+            return
+        }
+
         guard isReactionActuallyPlaying else {
             return
         }
@@ -564,9 +590,8 @@ final class DualPlayerViewModel: ObservableObject {
         }
     }
 
-    private func reactionTime(forPrimarySeconds primarySeconds: Double) -> CMTime {
-        let target = max(0, primarySeconds - reactionOffsetSeconds)
-        return CMTime(seconds: target, preferredTimescale: seekTimescale)
+    private func reactionSeconds(forPrimarySeconds primarySeconds: Double) -> Double {
+        max(0, primarySeconds - reactionOffsetSeconds)
     }
 
     private func clampReactionOffset(_ value: Double) -> Double {
@@ -577,16 +602,195 @@ final class DualPlayerViewModel: ObservableObject {
         min(max(value, 0), maxVolume)
     }
 
-    private func usesNetworkBackedStream(_ item: AVPlayerItem?) -> Bool {
-        guard let asset = item?.asset as? AVURLAsset else {
-            return false
+    private enum PlaybackStatus {
+        case playing
+        case paused
+        case waiting
+    }
+
+    private var primaryPlaybackStatus: PlaybackStatus {
+        switch primaryPlayer.timeControlStatus {
+        case .playing:
+            return .playing
+        case .paused:
+            return .paused
+        case .waitingToPlayAtSpecifiedRate:
+            return .waiting
+        @unknown default:
+            return .waiting
         }
-        return !asset.url.isFileURL
+    }
+
+    private var reactionPlaybackStatus: PlaybackStatus {
+        if isReactionYouTube {
+            switch reactionYouTubeState {
+            case .playing:
+                return .playing
+            case .paused, .ended, .cued:
+                return .paused
+            case .unstarted, .buffering, .unknown:
+                return .waiting
+            }
+        }
+
+        switch reactionPlayer.timeControlStatus {
+        case .playing:
+            return .playing
+        case .paused:
+            return .paused
+        case .waitingToPlayAtSpecifiedRate:
+            return .waiting
+        @unknown default:
+            return .waiting
+        }
+    }
+
+    private var currentReactionSeconds: Double {
+        if isReactionYouTube {
+            return reactionYouTubeCurrentSeconds
+        }
+        return reactionPlayer.currentTime().seconds
+    }
+
+    private func playReaction() {
+        if isReactionYouTube {
+            reactionYouTubeBridge.play()
+        } else {
+            reactionPlayer.playImmediately(atRate: 1.0)
+        }
+    }
+
+    private func pauseReaction() {
+        if isReactionYouTube {
+            reactionYouTubeBridge.pause()
+        } else {
+            reactionPlayer.pause()
+        }
+    }
+
+    private func seekReaction(to seconds: Double) {
+        let target = max(0, seconds)
+        if isReactionYouTube {
+            reactionYouTubeBridge.seek(to: target, allowSeekAhead: true)
+        } else {
+            let time = CMTime(seconds: target, preferredTimescale: seekTimescale)
+            reactionPlayer.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero)
+        }
+    }
+
+    private func seekReactionToMatchPrimaryTime(_ primarySeconds: Double) {
+        seekReaction(to: reactionSeconds(forPrimarySeconds: primarySeconds))
+    }
+
+    private func configureYouTubeBridge() {
+        reactionYouTubeBridge.onReady = { [weak self] in
+            guard let self else { return }
+            self.reactionYouTubeBridge.setVolume(self.reactionVolume)
+            if self.hasPrimaryVideo, self.hasReactionVideo, self.isPlaying {
+                self.startSynchronizedPlayback()
+            } else if self.isPlaying, self.hasReactionVideo {
+                self.playReaction()
+            }
+        }
+
+        reactionYouTubeBridge.onStateChange = { [weak self] state in
+            guard let self else { return }
+            self.reactionYouTubeState = state
+            if state == .ended {
+                self.pause()
+            } else {
+                self.synchronizeStateFromTick()
+            }
+        }
+
+        reactionYouTubeBridge.onTimeUpdate = { [weak self] current, duration in
+            guard let self else { return }
+            self.reactionYouTubeCurrentSeconds = current
+            if duration.isFinite, duration > 0 {
+                self.reactionYouTubeDurationSeconds = duration
+            }
+            self.synchronizeStateFromTick()
+        }
+
+        reactionYouTubeBridge.onError = { [weak self] message in
+            self?.alertMessage = message
+        }
+    }
+
+    private func loadYouTubeReaction(videoID: String, title: String) {
+        pauseReaction()
+        reactionPlayer.pause()
+        reactionPlayer.replaceCurrentItem(with: nil)
+
+        reactionYouTubeCurrentSeconds = 0
+        reactionYouTubeDurationSeconds = 0
+        reactionYouTubeState = .unstarted
+        reactionYouTubeVideoID = videoID
+        reactionTitle = title
+        hasReactionVideo = true
+        reactionYouTubeBridge.load(videoID: videoID)
+        reactionYouTubeBridge.setVolume(reactionVolume)
+
+        updateTimeline()
+        if isPlaying {
+            play()
+        } else {
+            realignReactionToPrimary()
+        }
+    }
+
+    private func clearYouTubeReactionState() {
+        guard isReactionYouTube else {
+            return
+        }
+        reactionYouTubeBridge.stop()
+        reactionYouTubeVideoID = nil
+        reactionYouTubeCurrentSeconds = 0
+        reactionYouTubeDurationSeconds = 0
+        reactionYouTubeState = .unstarted
+    }
+
+    private func extractYouTubeVideoID(from url: URL) -> String? {
+        let host = (url.host ?? "").lowercased()
+        let components = url.pathComponents.filter { $0 != "/" }
+
+        if host == "youtu.be" || host.hasSuffix(".youtu.be") {
+            return normalizeYouTubeVideoID(components.first)
+        }
+
+        guard host.contains("youtube.com") else {
+            return nil
+        }
+
+        if let urlComponents = URLComponents(url: url, resolvingAgainstBaseURL: false),
+           let value = urlComponents.queryItems?.first(where: { $0.name == "v" })?.value,
+           let videoID = normalizeYouTubeVideoID(value) {
+            return videoID
+        }
+
+        if let embedIndex = components.firstIndex(where: { $0 == "embed" || $0 == "shorts" || $0 == "live" }),
+           components.indices.contains(embedIndex + 1) {
+            return normalizeYouTubeVideoID(components[embedIndex + 1])
+        }
+
+        return nil
+    }
+
+    private func normalizeYouTubeVideoID(_ raw: String?) -> String? {
+        guard let raw else {
+            return nil
+        }
+        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_")
+        let cleaned = raw.unicodeScalars.filter { allowed.contains($0) }.map(String.init).joined()
+        guard cleaned.count == 11 else {
+            return nil
+        }
+        return cleaned
     }
 
     private func resolvePlayableURLIfNeeded(from url: URL) async throws -> URL {
         if isYouTubeURL(url) {
-            throw URLImportError.unsupportedPageURL("YouTube")
+            throw URLImportError.unsupportedYouTubeURL
         }
 
         if isVimeoURL(url), !isLikelyDirectMediaURL(url) {
@@ -867,6 +1071,7 @@ final class DualPlayerViewModel: ObservableObject {
         case invalidVimeoURL
         case unreachableURL
         case vimeoResolutionFailed
+        case unsupportedYouTubeURL
         case unsupportedPageURL(String)
 
         var errorDescription: String? {
@@ -877,6 +1082,8 @@ final class DualPlayerViewModel: ObservableObject {
                 return "Could not reach the URL."
             case .vimeoResolutionFailed:
                 return "Could not extract a playable stream from this Vimeo link."
+            case .unsupportedYouTubeURL:
+                return "Could not parse this YouTube link. Paste a standard URL like youtube.com/watch?v=... or youtu.be/..."
             case let .unsupportedPageURL(provider):
                 return "\(provider) page URLs are not directly playable. Paste a direct media stream URL instead."
             }
@@ -888,6 +1095,7 @@ final class DualPlayerViewModel: ObservableObject {
         reactionPlayer.volume = Float(reactionVolume)
         primaryPlayer.isMuted = primaryVolume <= 0.001
         reactionPlayer.isMuted = reactionVolume <= 0.001
+        reactionYouTubeBridge.setVolume(reactionVolume)
     }
 
     private func refreshPrimarySubtitleChoices(for item: AVPlayerItem?) async {

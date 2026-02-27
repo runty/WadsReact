@@ -205,7 +205,7 @@ struct ContentView: View {
             Text("Choose Reaction from URL")
                 .font(.title3.weight(.semibold))
 
-            Text("Paste a direct video URL (for example `.mp4` or `.m3u8`).")
+            Text("Paste a YouTube, Vimeo, or direct media URL (`.mp4` / `.m3u8`).")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
@@ -291,12 +291,7 @@ struct ContentView: View {
                         loaded: model.hasPrimaryVideo
                     )
 
-                    videoPane(
-                        title: "Reaction",
-                        fileName: model.reactionTitle,
-                        player: model.reactionPlayer,
-                        loaded: model.hasReactionVideo
-                    )
+                    reactionPane
                 }
             } else {
                 HStack(spacing: 12) {
@@ -307,12 +302,7 @@ struct ContentView: View {
                         loaded: model.hasPrimaryVideo
                     )
 
-                    videoPane(
-                        title: "Reaction",
-                        fileName: model.reactionTitle,
-                        player: model.reactionPlayer,
-                        loaded: model.hasReactionVideo
-                    )
+                    reactionPane
                 }
             }
         }
@@ -389,7 +379,7 @@ struct ContentView: View {
     }
 
     private func theaterReactionPiP(in container: CGSize) -> some View {
-        PlayerSurfaceView(player: model.reactionPlayer)
+        reactionPiPSurface
             .frame(width: pipSize.width, height: pipSize.height)
             .background(.black)
             .overlay(alignment: .topLeading) {
@@ -443,6 +433,36 @@ struct ContentView: View {
             )
     }
 
+    private var reactionPane: some View {
+        Group {
+            if model.isReactionYouTube, let videoID = model.reactionYouTubeVideoID {
+                youtubeVideoPane(
+                    title: "Reaction",
+                    fileName: model.reactionTitle,
+                    videoID: videoID,
+                    loaded: model.hasReactionVideo
+                )
+            } else {
+                videoPane(
+                    title: "Reaction",
+                    fileName: model.reactionTitle,
+                    player: model.reactionPlayer,
+                    loaded: model.hasReactionVideo
+                )
+            }
+        }
+    }
+
+    private var reactionPiPSurface: some View {
+        Group {
+            if model.isReactionYouTube, let videoID = model.reactionYouTubeVideoID {
+                YouTubePlayerSurfaceView(bridge: model.reactionYouTubeBridge, videoID: videoID)
+            } else {
+                PlayerSurfaceView(player: model.reactionPlayer)
+            }
+        }
+    }
+
     private func videoPane(title: String, fileName: String, player: AVPlayer, loaded: Bool) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(title)
@@ -454,6 +474,31 @@ struct ContentView: View {
 
             ZStack {
                 VideoPlayer(player: player)
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+
+                if !loaded {
+                    RoundedRectangle(cornerRadius: 12)
+                        .fill(.black.opacity(0.55))
+                    Text("No video selected")
+                        .foregroundStyle(.white)
+                }
+            }
+            .frame(minHeight: 220)
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private func youtubeVideoPane(title: String, fileName: String, videoID: String, loaded: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.headline)
+            Text(fileName)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+
+            ZStack {
+                YouTubePlayerSurfaceView(bridge: model.reactionYouTubeBridge, videoID: videoID)
                     .clipShape(RoundedRectangle(cornerRadius: 12))
 
                 if !loaded {
