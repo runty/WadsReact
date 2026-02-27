@@ -6,6 +6,8 @@ struct ContentView: View {
     @StateObject private var model = DualPlayerViewModel()
     @State private var importerPresented = false
     @State private var activeImportKind: DualPlayerViewModel.VideoKind = .primary
+    @State private var reactionURLSheetPresented = false
+    @State private var reactionURLInput = ""
     @State private var isTheaterMode = false
     @State private var syncStepSeconds = 0.5
     @State private var isScrubbing = false
@@ -165,6 +167,9 @@ struct ContentView: View {
         ) { result in
             model.importSelection(result, kind: activeImportKind)
         }
+        .sheet(isPresented: $reactionURLSheetPresented) {
+            reactionURLSheet
+        }
     }
 
     private var header: some View {
@@ -183,9 +188,52 @@ struct ContentView: View {
                 } label: {
                     Label("Choose Reaction", systemImage: "person.2")
                 }
+
+                Button {
+                    reactionURLInput = ""
+                    reactionURLSheetPresented = true
+                } label: {
+                    Label("Choose Reaction from URL", systemImage: "link.badge.plus")
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var reactionURLSheet: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Choose Reaction from URL")
+                .font(.title3.weight(.semibold))
+
+            Text("Paste a direct video URL (for example `.mp4` or `.m3u8`).")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            TextField("https://", text: $reactionURLInput)
+                .textFieldStyle(.roundedBorder)
+#if os(iOS)
+                .keyboardType(.URL)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+#endif
+
+            HStack {
+                Spacer()
+
+                Button("Cancel", role: .cancel) {
+                    reactionURLSheetPresented = false
+                }
+
+                Button("Load") {
+                    model.importFromURLString(reactionURLInput, kind: .reaction)
+                    reactionURLSheetPresented = false
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(reactionURLInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(16)
+        .frame(minWidth: 420)
     }
 
     private var floatingTheaterButton: some View {
