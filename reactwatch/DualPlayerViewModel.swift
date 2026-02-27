@@ -37,6 +37,7 @@ final class DualPlayerViewModel: ObservableObject {
 
     let minReactionOffsetSeconds = -600.0
     let maxReactionOffsetSeconds = 600.0
+    let maxVolume = 1.0
 
     var canMatchCurrentFrames: Bool {
         hasPrimaryVideo && hasReactionVideo
@@ -207,7 +208,7 @@ final class DualPlayerViewModel: ObservableObject {
 
     func togglePrimaryMute() {
         if primaryVolume <= 0.001 {
-            setPrimaryVolume(to: 1.0)
+            setPrimaryVolume(to: maxVolume)
         } else {
             setPrimaryVolume(to: 0)
         }
@@ -215,7 +216,7 @@ final class DualPlayerViewModel: ObservableObject {
 
     func toggleReactionMute() {
         if reactionVolume <= 0.001 {
-            setReactionVolume(to: 1.0)
+            setReactionVolume(to: maxVolume)
         } else {
             setReactionVolume(to: 0)
         }
@@ -511,7 +512,7 @@ final class DualPlayerViewModel: ObservableObject {
     }
 
     private func clampVolume(_ value: Double) -> Double {
-        min(max(value, 0), 1)
+        min(max(value, 0), maxVolume)
     }
 
     private func applyVolumeSettings() {

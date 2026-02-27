@@ -13,17 +13,28 @@ struct ContentView: View {
     @State private var pipOrigin = CGPoint(x: 24, y: 24)
     @State private var pipSize = CGSize(width: 360, height: 202)
     @State private var pipDragStartOrigin: CGPoint?
+    @State private var pipDragStartPointer: CGPoint?
     @State private var pipResizeStartSize: CGSize?
+    @State private var pipResizeStartPointer: CGPoint?
     @State private var hasInitializedPiP = false
     @State private var pipControlsVisible = true
     @State private var pipControlsAutoHideTicket = 0
     @State private var isDraggingPiP = false
     @State private var isResizingPiP = false
+    @State private var mainVideoVerticalOffset = 0.0
+    @State private var offsetInput = "+0.00"
+    @FocusState private var isEditingOffsetField: Bool
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
     private let pipPadding = 16.0
     private let pipMinSize = CGSize(width: 180, height: 101)
     private let pipDefaultSize = CGSize(width: 360, height: 202)
+    private let mainVideoNudgePoints = 20.0
+    private let controlCardCornerRadius = 14.0
+
+    private var controlPanelSpacing: CGFloat {
+        horizontalSizeClass == .compact ? 12 : 10
+    }
 
     private var isManipulatingPiP: Bool {
         isDraggingPiP || isResizingPiP
@@ -67,27 +78,69 @@ struct ContentView: View {
         "\(Int((value * 100).rounded()))%"
     }
 
+    private func formattedOffset(_ value: Double) -> String {
+        String(format: "%+.2f", value)
+    }
+
+    private func commitOffsetInput() {
+        let normalized = offsetInput
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: ",", with: ".")
+
+        guard let parsed = Double(normalized) else {
+            offsetInput = formattedOffset(model.reactionOffsetSeconds)
+            return
+        }
+
+        model.setReactionOffset(to: parsed)
+        offsetInput = formattedOffset(model.reactionOffsetSeconds)
+    }
+
     var body: some View {
-        VStack(spacing: isTheaterMode ? 0 : 16) {
-            if !isTheaterMode {
-                header
-            }
-
+        ZStack {
             if isTheaterMode {
-                players
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                players
+                Color.black
+                    .ignoresSafeArea()
             }
 
+            VStack(spacing: isTheaterMode ? 0 : 16) {
+                if !isTheaterMode {
+                    header
+                }
+
+                if isTheaterMode {
+                    players
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    players
+                }
+
+                if !isTheaterMode {
+                    controlsPanel
+                }
+            }
+            .padding(isTheaterMode ? 0 : 16)
+        }
+        .overlay(alignment: .bottomTrailing) {
             if !isTheaterMode {
-                transport
-                settings
-                subtitleControls
-                volumeControls
+                floatingTheaterButton
+                    .padding(.trailing, 16)
+                    .padding(.bottom, 14)
             }
         }
-        .padding(isTheaterMode ? 0 : 16)
+        .onAppear {
+            offsetInput = formattedOffset(model.reactionOffsetSeconds)
+        }
+        .onChange(of: model.reactionOffsetSeconds) { _, newValue in
+            if !isEditingOffsetField {
+                offsetInput = formattedOffset(newValue)
+            }
+        }
+        .onChange(of: isEditingOffsetField) { _, isFocused in
+            if !isFocused {
+                commitOffsetInput()
+            }
+        }
         .alert(
             "Unable to Open Video",
             isPresented: Binding(
@@ -116,11 +169,6 @@ struct ContentView: View {
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("ReactWatch")
-                .font(.title.bold())
-            Text("Play a show/movie and reaction video together in sync.")
-                .foregroundStyle(.secondary)
-
             HStack(spacing: 12) {
                 Button {
                     activeImportKind = .primary
@@ -136,21 +184,25 @@ struct ContentView: View {
                     Label("Choose Reaction", systemImage: "person.2")
                 }
             }
-
-            Button {
-                isTheaterMode.toggle()
-                if isTheaterMode {
-                    hasInitializedPiP = false
-                }
-            } label: {
-                Label(
-                    isTheaterMode ? "Exit Theatre Mode" : "Theatre Mode",
-                    systemImage: isTheaterMode ? "rectangle.grid.1x2" : "rectangle.inset.filled.and.person.filled"
-                )
-            }
-            .buttonStyle(.bordered)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var floatingTheaterButton: some View {
+        Button {
+            isTheaterMode.toggle()
+            if isTheaterMode {
+                hasInitializedPiP = false
+            }
+        } label: {
+            Label("Theatre Mode", systemImage: "rectangle.inset.filled.and.person.filled")
+                .font(.headline)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+        }
+        .buttonStyle(.borderedProminent)
+        .tint(.blue)
+        .controlSize(.large)
     }
 
     private var players: some View {
@@ -159,6 +211,7 @@ struct ContentView: View {
                 GeometryReader { geometry in
                     ZStack(alignment: .topLeading) {
                         theaterMainPlayer(in: geometry.size)
+                        theaterMainPositionControls(in: geometry.size)
 
                         if model.hasReactionVideo {
                             theaterReactionPiP(in: geometry.size)
@@ -235,6 +288,7 @@ struct ContentView: View {
             }
         }
         .frame(width: container.width, height: theaterMainHeight(in: container), alignment: .top)
+        .offset(y: mainVideoVerticalOffset)
         .overlay(alignment: .topTrailing) {
             if isTheaterMode {
                 Button {
@@ -249,6 +303,41 @@ struct ContentView: View {
                 .foregroundStyle(.white.opacity(0.9))
             }
         }
+    }
+
+    private func theaterMainPositionControlsTop(in container: CGSize) -> CGFloat {
+        let desiredTop = theaterMainHeight(in: container) + 8 + mainVideoVerticalOffset
+        let maxVisibleTop = max(8, container.height - 72)
+        return min(max(desiredTop, 8), maxVisibleTop)
+    }
+
+    private func theaterMainPositionControls(in container: CGSize) -> some View {
+        VStack(spacing: 4) {
+            theaterMainNudgeButton(systemImage: "chevron.up") {
+                mainVideoVerticalOffset -= mainVideoNudgePoints
+            }
+
+            theaterMainNudgeButton(systemImage: "chevron.down") {
+                mainVideoVerticalOffset += mainVideoNudgePoints
+            }
+        }
+        .padding(.leading, 8)
+        .padding(.top, theaterMainPositionControlsTop(in: container))
+    }
+
+    private func theaterMainNudgeButton(systemImage: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.system(size: 12, weight: .semibold))
+                .frame(width: 28, height: 28)
+                .foregroundStyle(.white)
+                .background(.ultraThinMaterial, in: Circle())
+                .overlay {
+                    Circle()
+                        .stroke(.white.opacity(0.35), lineWidth: 0.8)
+                }
+        }
+        .buttonStyle(.plain)
     }
 
     private func theaterReactionPiP(in container: CGSize) -> some View {
@@ -371,7 +460,7 @@ struct ContentView: View {
     }
 
     private func pipDragGesture(in container: CGSize) -> some Gesture {
-        DragGesture()
+        DragGesture(minimumDistance: 0, coordinateSpace: .global)
             .onChanged { value in
                 guard !isResizingPiP else {
                     return
@@ -379,38 +468,47 @@ struct ContentView: View {
 
                 if pipDragStartOrigin == nil {
                     pipDragStartOrigin = pipOrigin
+                    pipDragStartPointer = value.startLocation
                     isDraggingPiP = true
                     revealPiPControls()
                 }
 
                 let start = pipDragStartOrigin ?? pipOrigin
+                let startPointer = pipDragStartPointer ?? value.startLocation
+                let deltaX = value.location.x - startPointer.x
+                let deltaY = value.location.y - startPointer.y
                 let proposed = CGPoint(
-                    x: start.x + value.translation.width,
-                    y: start.y + value.translation.height
+                    x: start.x + deltaX,
+                    y: start.y + deltaY
                 )
 
                 pipOrigin = clampedPiPOrigin(proposed, size: pipSize, in: container)
             }
             .onEnded { _ in
                 pipDragStartOrigin = nil
+                pipDragStartPointer = nil
                 isDraggingPiP = false
                 revealPiPControls()
             }
     }
 
     private func pipResizeGesture(in container: CGSize) -> some Gesture {
-        DragGesture()
+        DragGesture(minimumDistance: 0, coordinateSpace: .global)
             .onChanged { value in
                 if pipResizeStartSize == nil {
                     pipResizeStartSize = pipSize
+                    pipResizeStartPointer = value.startLocation
                     isResizingPiP = true
                     revealPiPControls()
                 }
 
                 let start = pipResizeStartSize ?? pipSize
+                let startPointer = pipResizeStartPointer ?? value.startLocation
+                let deltaX = value.location.x - startPointer.x
+                let deltaY = value.location.y - startPointer.y
                 let proposed = CGSize(
-                    width: start.width + value.translation.width,
-                    height: start.height + value.translation.height
+                    width: start.width + deltaX,
+                    height: start.height + deltaY
                 )
 
                 let clamped = clampedPiPSize(proposed, in: container)
@@ -419,6 +517,7 @@ struct ContentView: View {
             }
             .onEnded { _ in
                 pipResizeStartSize = nil
+                pipResizeStartPointer = nil
                 isResizingPiP = false
                 revealPiPControls()
             }
@@ -431,8 +530,88 @@ struct ContentView: View {
         pipControlsAutoHideTicket += 1
     }
 
+    private var controlsPanel: some View {
+        VStack(spacing: controlPanelSpacing) {
+            compactControlCard {
+                transport
+            }
+
+            if horizontalSizeClass == .compact {
+                controlCard {
+                    settings
+                }
+
+                controlCard {
+                    subtitleControls
+                }
+
+                controlCard {
+                    volumeControls
+                }
+            } else {
+                HStack(alignment: .top, spacing: 12) {
+                    VStack(spacing: 12) {
+                        controlCard {
+                            settings
+                        }
+
+                        controlCard {
+                            subtitleControls
+                        }
+                    }
+                    .frame(maxWidth: .infinity)
+
+                    controlCard {
+                        volumeControls
+                    }
+                    .frame(maxWidth: 420)
+                }
+            }
+        }
+    }
+
+    private func controlCard<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        content()
+            .padding(12)
+            .background(
+                RoundedRectangle(cornerRadius: controlCardCornerRadius, style: .continuous)
+                    .fill(.regularMaterial)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: controlCardCornerRadius, style: .continuous)
+                    .stroke(.white.opacity(0.14), lineWidth: 1)
+            )
+    }
+
+    private func compactControlCard<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        content()
+            .padding(10)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(.regularMaterial)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(.white.opacity(0.14), lineWidth: 1)
+            )
+    }
+
+    private func sectionHeader(_ title: String, systemImage: String, color: Color) -> some View {
+        Label {
+            Text(title)
+                .font(.headline)
+                .foregroundStyle(.primary)
+        } icon: {
+            Image(systemName: systemImage)
+                .foregroundStyle(color)
+        }
+    }
+
     private var transport: some View {
-        VStack(spacing: 10) {
+        VStack(spacing: 7) {
+            sectionHeader("Transport", systemImage: "play.square.fill", color: .blue)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
             Slider(
                 value: Binding(
                     get: { displayedTime },
@@ -461,21 +640,23 @@ struct ContentView: View {
             .font(.caption)
             .foregroundStyle(.secondary)
 
-            HStack(spacing: 20) {
+            HStack(spacing: 14) {
                 Button {
                     model.skip(by: -10)
                 } label: {
                     Image(systemName: "gobackward.10")
                 }
                 .buttonStyle(.bordered)
+                .controlSize(.small)
 
                 Button {
                     model.playPause()
                 } label: {
                     Image(systemName: model.isPlaying ? "pause.fill" : "play.fill")
-                        .font(.title2)
+                        .font(.body.weight(.semibold))
                 }
                 .buttonStyle(.borderedProminent)
+                .controlSize(.regular)
 
                 Button {
                     model.skip(by: 10)
@@ -483,93 +664,110 @@ struct ContentView: View {
                     Image(systemName: "goforward.10")
                 }
                 .buttonStyle(.bordered)
+                .controlSize(.small)
             }
         }
     }
 
     private var settings: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Sync Offset")
-                .font(.headline)
+        VStack(alignment: .leading, spacing: 10) {
+            sectionHeader("Sync Offset", systemImage: "link", color: .orange)
 
-            Text("Use this when the reaction has an intro or starts late. Positive values delay the reaction.")
+            Text("Set the reaction delay directly, then nudge with the quick buttons.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
-            HStack(spacing: 12) {
-                Text(String(format: "%+.2f s", model.reactionOffsetSeconds))
-                    .monospacedDigit()
-                    .frame(width: 70, alignment: .leading)
+            HStack(spacing: 10) {
+                Text("Offset")
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(.secondary)
 
-                Slider(
-                    value: Binding(
-                        get: { model.reactionOffsetSeconds },
-                        set: { value in
-                            model.setReactionOffset(to: value)
-                        }
-                    ),
-                    in: model.minReactionOffsetSeconds...model.maxReactionOffsetSeconds,
-                    step: 0.05
-                )
+                TextField("0.00", text: $offsetInput)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 92)
+                    .multilineTextAlignment(.trailing)
+                    .monospacedDigit()
+                    .focused($isEditingOffsetField)
+#if os(iOS)
+                    .keyboardType(.numbersAndPunctuation)
+#endif
+                    .onSubmit {
+                        commitOffsetInput()
+                    }
+
+                Text("seconds")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+
+                Spacer()
+
+                Text("\(formattedOffset(model.reactionOffsetSeconds))s")
+                    .font(.caption)
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
             }
 
-            HStack(spacing: 8) {
-                Button {
-                    model.nudgeReactionOffset(by: -syncStepSeconds)
-                } label: {
-                    Label("Earlier", systemImage: "chevron.backward.circle.fill")
-                }
-                .buttonStyle(.borderedProminent)
+            VStack(spacing: 8) {
+                HStack(spacing: 8) {
+                    Button {
+                        model.nudgeReactionOffset(by: -syncStepSeconds)
+                    } label: {
+                        Label("Earlier", systemImage: "chevron.backward")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
 
-                Button {
-                    model.nudgeReactionOffset(by: syncStepSeconds)
-                } label: {
-                    Label("Later", systemImage: "chevron.forward.circle.fill")
-                }
-                .buttonStyle(.borderedProminent)
-
-                Menu {
-                    ForEach([0.1, 0.5, 1.0, 5.0, 15.0], id: \.self) { step in
-                        Button {
-                            syncStepSeconds = step
-                        } label: {
-                            if abs(syncStepSeconds - step) < 0.001 {
-                                Label(secondsLabel(step), systemImage: "checkmark")
-                            } else {
-                                Text(secondsLabel(step))
+                    Menu {
+                        ForEach([0.05, 0.1, 0.5, 1.0, 5.0, 15.0], id: \.self) { step in
+                            Button {
+                                syncStepSeconds = step
+                            } label: {
+                                if abs(syncStepSeconds - step) < 0.001 {
+                                    Label(secondsLabel(step), systemImage: "checkmark")
+                                } else {
+                                    Text(secondsLabel(step))
+                                }
                             }
                         }
+                    } label: {
+                        Label("Step \(secondsLabel(syncStepSeconds))", systemImage: "dial.medium")
+                            .frame(minWidth: 138)
                     }
-                } label: {
-                    Label("Step: \(secondsLabel(syncStepSeconds))", systemImage: "slider.horizontal.3")
-                }
-                .buttonStyle(.bordered)
-            }
+                    .buttonStyle(.bordered)
 
-            HStack(spacing: 8) {
-                Button("Match Current Frames") {
-                    model.matchOffsetToCurrentFrames()
+                    Button {
+                        model.nudgeReactionOffset(by: syncStepSeconds)
+                    } label: {
+                        Label("Later", systemImage: "chevron.forward")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
                 }
-                .buttonStyle(.bordered)
-                .disabled(!model.canMatchCurrentFrames)
 
-                Button("Reset Offset") {
-                    model.resetReactionOffset()
+                HStack(spacing: 8) {
+                    Button {
+                        model.matchOffsetToCurrentFrames()
+                    } label: {
+                        Label("Match Frames", systemImage: "scope")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(!model.canMatchCurrentFrames)
+
+                    Button {
+                        model.resetReactionOffset()
+                    } label: {
+                        Label("Reset Offset", systemImage: "arrow.counterclockwise")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
                 }
-                .buttonStyle(.bordered)
             }
 
             Text(syncStatusText)
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .monospacedDigit()
-                .lineLimit(2)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
-
-            Text("Tip: Negative means reaction plays earlier, positive means it plays later.")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -577,12 +775,17 @@ struct ContentView: View {
 
     private var volumeControls: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Audio")
-                .font(.headline)
+            sectionHeader("Audio Levels", systemImage: "speaker.wave.2.fill", color: .green)
+
+            Text("Adjust show and reaction audio independently.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
 
             HStack(spacing: 10) {
                 Label("Show", systemImage: "film")
-                    .frame(width: 80, alignment: .leading)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.9)
+                    .frame(width: 96, alignment: .leading)
 
                 Slider(
                     value: Binding(
@@ -591,7 +794,7 @@ struct ContentView: View {
                             model.setPrimaryVolume(to: value)
                         }
                     ),
-                    in: 0...1
+                    in: 0...model.maxVolume
                 )
 
                 Text(percentLabel(model.primaryVolume))
@@ -608,7 +811,9 @@ struct ContentView: View {
 
             HStack(spacing: 10) {
                 Label("Reaction", systemImage: "person.2")
-                    .frame(width: 80, alignment: .leading)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.9)
+                    .frame(width: 96, alignment: .leading)
 
                 Slider(
                     value: Binding(
@@ -617,7 +822,7 @@ struct ContentView: View {
                             model.setReactionVolume(to: value)
                         }
                     ),
-                    in: 0...1
+                    in: 0...model.maxVolume
                 )
 
                 Text(percentLabel(model.reactionVolume))
@@ -637,8 +842,7 @@ struct ContentView: View {
 
     private var subtitleControls: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Subtitles (Main Video)")
-                .font(.headline)
+            sectionHeader("Subtitles (Main Video)", systemImage: "captions.bubble.fill", color: .mint)
 
             Picker(
                 "Subtitle Track",
