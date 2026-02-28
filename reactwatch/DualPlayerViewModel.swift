@@ -1,5 +1,6 @@
 import AVFoundation
 import Combine
+import CryptoKit
 import SwiftUI
 
 @MainActor
@@ -36,6 +37,8 @@ final class DualPlayerViewModel: ObservableObject {
     @Published private(set) var subtitleChoices: [SubtitleChoice] = [.none]
     @Published var selectedSubtitleID = SubtitleChoice.noneID
     @Published var alertMessage: String?
+    @Published var importActivityMessage: String?
+    @Published var importActivityProgress: Double?
 
     let minReactionOffsetSeconds = -600.0
     let maxReactionOffsetSeconds = 600.0
@@ -72,6 +75,8 @@ final class DualPlayerViewModel: ObservableObject {
     private let correctionSeekTolerance = CMTime(seconds: 0.02, preferredTimescale: 600)
     private let youTubeResyncThresholdSeconds = 1.2
     private let minimumYouTubeCorrectionInterval = 2.5
+    private let convertedMediaDirectoryName = "ConvertedMedia"
+    private let convertedMediaExtension = "mp4"
 
     init() {
         configurePlayersForSync()
@@ -322,7 +327,19 @@ final class DualPlayerViewModel: ObservableObject {
     private func loadVideo(at url: URL, kind: VideoKind) async {
         retainSecurityScope(for: url)
 
-        let asset = AVURLAsset(url: url)
+        var preparedURL = url
+        var mkvPreparationError: Error?
+        if url.isFileURL, url.pathExtension.lowercased() == "mkv" {
+            do {
+                preparedURL = try await prepareLocalURLForPlaybackIfNeeded(url)
+            } catch {
+                // If preparation fails, still try to play the original MKV directly.
+                mkvPreparationError = error
+                setImportActivity(nil)
+            }
+        }
+
+        let asset = AVURLAsset(url: preparedURL)
         let playable: Bool
 
         do {
@@ -334,7 +351,11 @@ final class DualPlayerViewModel: ObservableObject {
 
         guard playable else {
             if url.pathExtension.lowercased() == "mkv" {
-                alertMessage = "This MKV file is not playable by AVPlayer on this device. Try MP4/MOV (H.264/H.265 + AAC)."
+                if let mkvPreparationError {
+                    alertMessage = "This MKV is not directly playable and conversion failed: \(mkvPreparationError.localizedDescription)"
+                } else {
+                    alertMessage = "This MKV file is not playable on this device. Try MP4/MOV (H.264/H.265 + AAC)."
+                }
             } else if !url.isFileURL, isLikelyHostedVideoPage(url) {
                 alertMessage = "This appears to be a YouTube/Vimeo page URL. AVPlayer can only play direct media streams (for example .m3u8/.mp4)."
             } else {
@@ -344,18 +365,19 @@ final class DualPlayerViewModel: ObservableObject {
         }
 
         let item = AVPlayerItem(asset: asset)
+        let displayTitle = url.lastPathComponent
 
         switch kind {
         case .primary:
             await refreshPrimaryVideoAspectRatio(for: asset)
             primaryPlayer.replaceCurrentItem(with: item)
-            primaryTitle = url.lastPathComponent
+            primaryTitle = displayTitle
             hasPrimaryVideo = true
             await refreshPrimarySubtitleChoices(for: item)
         case .reaction:
             clearYouTubeReactionState()
             reactionPlayer.replaceCurrentItem(with: item)
-            reactionTitle = url.lastPathComponent
+            reactionTitle = displayTitle
             hasReactionVideo = true
         }
 
@@ -390,6 +412,415 @@ final class DualPlayerViewModel: ObservableObject {
             primaryVideoAspectRatio = width / height
         } catch {
             primaryVideoAspectRatio = 16.0 / 9.0
+        }
+    }
+
+    private func setImportActivity(_ message: String?, progress: Double? = nil) {
+        importActivityMessage = message
+        importActivityProgress = progress
+    }
+
+    private func prepareLocalURLForPlaybackIfNeeded(_ sourceURL: URL) async throws -> URL {
+        guard sourceURL.isFileURL else {
+            return sourceURL
+        }
+
+        guard sourceURL.pathExtension.lowercased() == "mkv" else {
+            return sourceURL
+        }
+
+        let outputURL = try convertedOutputURL(for: sourceURL)
+        if FileManager.default.fileExists(atPath: outputURL.path) {
+            let cachedPlayable = (try? await AVURLAsset(url: outputURL).load(.isPlayable)) ?? false
+            if cachedPlayable {
+                return outputURL
+            }
+            try? FileManager.default.removeItem(at: outputURL)
+        }
+
+        setImportActivity("Preparing MKV for playback…", progress: 0)
+        defer {
+            setImportActivity(nil)
+        }
+
+        let asset = AVURLAsset(url: sourceURL)
+        try await convertMKVAsset(asset, sourceURL: sourceURL, outputURL: outputURL)
+        return outputURL
+    }
+
+    private func convertMKVAsset(_ asset: AVURLAsset, sourceURL: URL, outputURL: URL) async throws {
+        var lastError: Error?
+        var embeddedError: Error?
+        var attemptFailures: [String] = []
+
+        do {
+            try await convertMKVWithEmbeddedFFmpeg(sourceURL: sourceURL, outputURL: outputURL, includeAudio: true)
+            let isPlayable = try await AVURLAsset(url: outputURL).load(.isPlayable)
+            if isPlayable {
+                return
+            }
+            attemptFailures.append("Embedded FFmpeg remux (video+audio) produced an MP4 that AVPlayer could not play.")
+
+            if try await repairConvertedMP4ForPlaybackIfPossible(
+                sourceURL: outputURL,
+                destinationURL: outputURL,
+                activityMessage: "Preparing MKV (2/3): Repairing remuxed MP4…"
+            ) {
+                return
+            }
+            attemptFailures.append("AVFoundation could not repair the remuxed video+audio MP4.")
+
+            try? FileManager.default.removeItem(at: outputURL)
+
+            try await convertMKVWithEmbeddedFFmpeg(sourceURL: sourceURL, outputURL: outputURL, includeAudio: false)
+            let videoOnlyPlayable = try await AVURLAsset(url: outputURL).load(.isPlayable)
+            if videoOnlyPlayable {
+                attemptFailures.append("Embedded FFmpeg video-only remux succeeded after dropping incompatible audio.")
+                return
+            }
+            attemptFailures.append("Embedded FFmpeg remux (video-only) produced an MP4 that AVPlayer could not play.")
+
+            if try await repairConvertedMP4ForPlaybackIfPossible(
+                sourceURL: outputURL,
+                destinationURL: outputURL,
+                activityMessage: "Preparing MKV (2/3): Repairing remuxed video-only MP4…"
+            ) {
+                return
+            }
+            attemptFailures.append("AVFoundation could not repair the remuxed video-only MP4.")
+            lastError = MKVPreparationError.unsupported
+        } catch {
+            embeddedError = error
+            lastError = error
+            attemptFailures.append("Embedded FFmpeg remux failed: \(diagnosticMessage(for: error))")
+        }
+
+        try? FileManager.default.removeItem(at: outputURL)
+
+        let presets = AVAssetExportSession.exportPresets(compatibleWith: asset)
+        var candidatePresets: [String] = []
+        if presets.contains(AVAssetExportPresetPassthrough) {
+            candidatePresets.append(AVAssetExportPresetPassthrough)
+        }
+        if presets.contains(AVAssetExportPresetHighestQuality) {
+            candidatePresets.append(AVAssetExportPresetHighestQuality)
+        }
+        if presets.contains(AVAssetExportPresetMediumQuality) {
+            candidatePresets.append(AVAssetExportPresetMediumQuality)
+        }
+
+        for preset in candidatePresets {
+            do {
+                try await exportAssetToMP4(
+                    asset: asset,
+                    presetName: preset,
+                    outputURL: outputURL,
+                    activityMessage: "Preparing MKV (2/3): AVFoundation export…"
+                )
+                let isPlayable = try await AVURLAsset(url: outputURL).load(.isPlayable)
+                if isPlayable {
+                    return
+                }
+                attemptFailures.append("AVFoundation export (\(preset)) produced an unplayable MP4.")
+            } catch {
+                lastError = error
+                attemptFailures.append("AVFoundation export (\(preset)) failed: \(diagnosticMessage(for: error))")
+            }
+
+            try? FileManager.default.removeItem(at: outputURL)
+        }
+
+#if os(macOS)
+        if let ffmpegPath = findFFmpegPath() {
+            do {
+                try await convertMKVWithFFmpeg(sourceURL: sourceURL, outputURL: outputURL, ffmpegPath: ffmpegPath)
+                let isPlayable = try await AVURLAsset(url: outputURL).load(.isPlayable)
+                if isPlayable {
+                    return
+                }
+                attemptFailures.append("System ffmpeg conversion produced an unplayable MP4.")
+            } catch {
+                lastError = error
+                attemptFailures.append("System ffmpeg conversion failed: \(diagnosticMessage(for: error))")
+            }
+        } else if !FFmpegRemuxer.isEmbeddedAvailable {
+            lastError = MKVPreparationError.ffmpegUnavailable
+            attemptFailures.append("System ffmpeg was not found and embedded FFmpeg is unavailable.")
+        }
+#endif
+
+        if !attemptFailures.isEmpty {
+            throw MKVPreparationError.detailed(attemptFailures.joined(separator: "\n"))
+        }
+        throw embeddedError ?? lastError ?? MKVPreparationError.unsupported
+    }
+
+    private func convertMKVWithEmbeddedFFmpeg(sourceURL: URL, outputURL: URL, includeAudio: Bool) async throws {
+        let modeLabel = includeAudio ? "video+audio" : "video-only"
+        setImportActivity("Preparing MKV (1/3): Embedded FFmpeg remux (\(modeLabel))…", progress: nil)
+        try? FileManager.default.removeItem(at: outputURL)
+        try await Task.detached(priority: .userInitiated) {
+            if includeAudio {
+                try FFmpegRemuxer.remuxMKVToMP4(inputURL: sourceURL, outputURL: outputURL)
+            } else {
+                try FFmpegRemuxer.remuxMKVToMP4VideoOnly(inputURL: sourceURL, outputURL: outputURL)
+            }
+        }.value
+    }
+
+    private func exportAssetToMP4(
+        asset: AVAsset,
+        presetName: String,
+        outputURL: URL,
+        activityMessage: String
+    ) async throws {
+        try? FileManager.default.removeItem(at: outputURL)
+
+        guard let exportSession = AVAssetExportSession(asset: asset, presetName: presetName) else {
+            throw MKVPreparationError.exportSessionUnavailable
+        }
+
+        setImportActivity(activityMessage, progress: 0)
+        exportSession.outputURL = outputURL
+        exportSession.outputFileType = .mp4
+        exportSession.shouldOptimizeForNetworkUse = true
+
+        let monitorTask = Task { [weak exportSession] in
+            while !Task.isCancelled {
+                guard let exportSession else { break }
+                switch exportSession.status {
+                case .waiting, .exporting:
+                    let progress = Double(exportSession.progress)
+                    await MainActor.run {
+                        self.setImportActivity(activityMessage, progress: progress)
+                    }
+                default:
+                    return
+                }
+                try? await Task.sleep(for: .milliseconds(120))
+            }
+        }
+
+        defer { monitorTask.cancel() }
+
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            exportSession.exportAsynchronously {
+                switch exportSession.status {
+                case .completed:
+                    continuation.resume()
+                case .failed:
+                    continuation.resume(throwing: exportSession.error ?? MKVPreparationError.exportFailed)
+                case .cancelled:
+                    continuation.resume(throwing: MKVPreparationError.exportCancelled)
+                default:
+                    continuation.resume(throwing: MKVPreparationError.exportFailed)
+                }
+            }
+        }
+    }
+
+    private func repairConvertedMP4ForPlaybackIfPossible(
+        sourceURL: URL,
+        destinationURL: URL,
+        activityMessage: String
+    ) async throws -> Bool {
+        let sourceAsset = AVURLAsset(url: sourceURL)
+        let sourceIsPlayable = (try? await sourceAsset.load(.isPlayable)) ?? false
+        guard sourceIsPlayable else {
+            return false
+        }
+
+        let presets = AVAssetExportSession.exportPresets(compatibleWith: sourceAsset)
+        var candidatePresets: [String] = []
+        if presets.contains(AVAssetExportPresetPassthrough) {
+            candidatePresets.append(AVAssetExportPresetPassthrough)
+        }
+        if presets.contains(AVAssetExportPresetHighestQuality) {
+            candidatePresets.append(AVAssetExportPresetHighestQuality)
+        }
+        if presets.contains(AVAssetExportPresetMediumQuality) {
+            candidatePresets.append(AVAssetExportPresetMediumQuality)
+        }
+        guard !candidatePresets.isEmpty else {
+            return false
+        }
+
+        let repairedURL = destinationURL
+            .deletingPathExtension()
+            .appendingPathExtension("repaired.mp4")
+
+        for preset in candidatePresets {
+            do {
+                try await exportAssetToMP4(
+                    asset: sourceAsset,
+                    presetName: preset,
+                    outputURL: repairedURL,
+                    activityMessage: activityMessage
+                )
+                let repairedPlayable = try await AVURLAsset(url: repairedURL).load(.isPlayable)
+                if repairedPlayable {
+                    try? FileManager.default.removeItem(at: destinationURL)
+                    try FileManager.default.moveItem(at: repairedURL, to: destinationURL)
+                    return true
+                }
+            } catch {
+                // Keep trying remaining presets.
+            }
+            try? FileManager.default.removeItem(at: repairedURL)
+        }
+
+        return false
+    }
+
+    private func convertedOutputURL(for sourceURL: URL) throws -> URL {
+        let cacheDirectory = try convertedMediaDirectoryURL()
+        let digest = cacheDigest(for: sourceURL)
+        return cacheDirectory
+            .appendingPathComponent(digest, isDirectory: false)
+            .appendingPathExtension(convertedMediaExtension)
+    }
+
+    private func convertedMediaDirectoryURL() throws -> URL {
+        let cachesRoot = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+        let directory = cachesRoot.appendingPathComponent(convertedMediaDirectoryName, isDirectory: true)
+        if !FileManager.default.fileExists(atPath: directory.path) {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        }
+        return directory
+    }
+
+    private func cacheDigest(for sourceURL: URL) -> String {
+        let attributes = try? FileManager.default.attributesOfItem(atPath: sourceURL.path)
+        let fileSize = (attributes?[.size] as? NSNumber)?.int64Value ?? 0
+        let modified = (attributes?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+        let key = "\(sourceURL.standardizedFileURL.path)|\(fileSize)|\(modified)"
+        let digest = SHA256.hash(data: Data(key.utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+#if os(macOS)
+    private func convertMKVWithFFmpeg(sourceURL: URL, outputURL: URL, ffmpegPath: String) async throws {
+        setImportActivity("Preparing MKV (3/3): System ffmpeg fallback…", progress: nil)
+        try? FileManager.default.removeItem(at: outputURL)
+
+        let remuxArguments = [
+            "-y",
+            "-i", sourceURL.path,
+            "-map", "0:v:0",
+            "-map", "0:a:0?",
+            "-c", "copy",
+            "-movflags", "+faststart",
+            outputURL.path
+        ]
+
+        do {
+            try await runFFmpeg(at: ffmpegPath, arguments: remuxArguments)
+            return
+        } catch {
+            try? FileManager.default.removeItem(at: outputURL)
+        }
+
+        let transcodeArguments = [
+            "-y",
+            "-i", sourceURL.path,
+            "-map", "0:v:0",
+            "-map", "0:a:0?",
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-crf", "20",
+            "-c:a", "aac",
+            "-movflags", "+faststart",
+            outputURL.path
+        ]
+
+        try await runFFmpeg(at: ffmpegPath, arguments: transcodeArguments)
+    }
+
+    private func runFFmpeg(at executablePath: String, arguments: [String]) async throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executablePath)
+        process.arguments = arguments
+
+        let stderrPipe = Pipe()
+        process.standardError = stderrPipe
+        process.standardOutput = Pipe()
+
+        try process.run()
+        let terminationStatus = await withCheckedContinuation { (continuation: CheckedContinuation<Int32, Never>) in
+            process.terminationHandler = { terminated in
+                continuation.resume(returning: terminated.terminationStatus)
+            }
+        }
+
+        guard terminationStatus == 0 else {
+            let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+            let stderr = String(data: stderrData, encoding: .utf8) ?? "Unknown ffmpeg error"
+            throw MKVPreparationError.ffmpegFailed(stderr)
+        }
+    }
+
+    private func findFFmpegPath() -> String? {
+        let fm = FileManager.default
+        let directCandidates = [
+            "/opt/homebrew/bin/ffmpeg",
+            "/usr/local/bin/ffmpeg",
+            "/usr/bin/ffmpeg"
+        ]
+        for path in directCandidates where fm.isExecutableFile(atPath: path) {
+            return path
+        }
+
+        let envPath = ProcessInfo.processInfo.environment["PATH"] ?? ""
+        for entry in envPath.split(separator: ":") {
+            let candidate = String(entry) + "/ffmpeg"
+            if fm.isExecutableFile(atPath: candidate) {
+                return candidate
+            }
+        }
+
+        return nil
+    }
+#endif
+
+    private func diagnosticMessage(for error: Error) -> String {
+        let nsError = error as NSError
+        var message = error.localizedDescription
+        message += " [\(nsError.domain):\(nsError.code)]"
+
+        if let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? NSError {
+            message += " Underlying: \(underlying.localizedDescription) [\(underlying.domain):\(underlying.code)]"
+        }
+
+        return message
+    }
+
+    private enum MKVPreparationError: LocalizedError {
+        case unsupported
+        case exportSessionUnavailable
+        case exportFailed
+        case exportCancelled
+        case ffmpegUnavailable
+        case ffmpegFailed(String)
+        case detailed(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .unsupported:
+                return "This MKV file could not be converted to a playable MP4."
+            case .exportSessionUnavailable:
+                return "This MKV file format is not supported for on-device conversion."
+            case .exportFailed:
+                return "Failed to convert MKV to MP4."
+            case .exportCancelled:
+                return "MKV conversion was cancelled."
+            case .ffmpegUnavailable:
+                return "MKV conversion requires ffmpeg on this Mac, but it was not found."
+            case let .ffmpegFailed(details):
+                return "ffmpeg failed while converting MKV: \(details)"
+            case let .detailed(details):
+                return details
+            }
         }
     }
 

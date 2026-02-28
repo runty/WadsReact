@@ -1,0 +1,12 @@
+module Libavutil [system] {
+  header "libavutil/avutil.h"
+  export *
+}
+module Libavcodec [system] {
+  header "libavcodec/avcodec.h"
+  export *
+}
+module Libavformat [system] {
+  header "libavformat/avformat.h"
+  export *
+}

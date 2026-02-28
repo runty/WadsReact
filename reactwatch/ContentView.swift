@@ -206,6 +206,23 @@ struct ContentView: View {
                     Label("Choose Reaction from URL", systemImage: "link.badge.plus")
                 }
             }
+
+            if let message = model.importActivityMessage {
+                HStack(spacing: 8) {
+                    if let progress = model.importActivityProgress {
+                        ProgressView(value: progress)
+                            .frame(width: 140)
+                    } else {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+
+                    Text(message)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }

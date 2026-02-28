@@ -1,0 +1,11 @@
+FFmpeg
+Website: https://ffmpeg.org/
+License: LGPL v2.1 or later (default FFmpeg license for non-GPL configuration)
+
+This project includes scripts to build FFmpeg static libraries for local use.
+If distributed with FFmpeg binaries, ensure full compliance with FFmpeg/LGPL requirements,
+including attribution and any required source/code offer obligations.
+
+License text:
+- https://ffmpeg.org/legal.html
+- https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html

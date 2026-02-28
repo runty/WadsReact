@@ -6,6 +6,12 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		F0A100000000000000000001 /* Libavcodec in Frameworks */ = {isa = PBXBuildFile; productRef = F0A100000000000000000011 /* Libavcodec */; };
+		F0A100000000000000000002 /* Libavformat in Frameworks */ = {isa = PBXBuildFile; productRef = F0A100000000000000000012 /* Libavformat */; };
+		F0A100000000000000000003 /* Libavutil in Frameworks */ = {isa = PBXBuildFile; productRef = F0A100000000000000000013 /* Libavutil */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
 		32C374E72F512B260049C823 /* reactwatch.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = reactwatch.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -23,6 +29,9 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				F0A100000000000000000001 /* Libavcodec in Frameworks */,
+				F0A100000000000000000002 /* Libavformat in Frameworks */,
+				F0A100000000000000000003 /* Libavutil in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -65,6 +74,9 @@
 			);
 			name = reactwatch;
 			packageProductDependencies = (
+				F0A100000000000000000011 /* Libavcodec */,
+				F0A100000000000000000012 /* Libavformat */,
+				F0A100000000000000000013 /* Libavutil */,
 			);
 			productName = reactwatch;
 			productReference = 32C374E72F512B260049C823 /* reactwatch.app */;
@@ -94,6 +106,9 @@
 			);
 			mainGroup = 32C374DE2F512B260049C823;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				F0A100000000000000000010 /* XCLocalSwiftPackageReference "Vendor/FFmpegLocal" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 32C374E82F512B260049C823 /* Products */;
 			projectDirPath = "";
@@ -123,6 +138,31 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		F0A100000000000000000010 /* XCLocalSwiftPackageReference "Vendor/FFmpegLocal" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Vendor/FFmpegLocal;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		F0A100000000000000000011 /* Libavcodec */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = F0A100000000000000000010 /* XCLocalSwiftPackageReference "Vendor/FFmpegLocal" */;
+			productName = Libavcodec;
+		};
+		F0A100000000000000000012 /* Libavformat */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = F0A100000000000000000010 /* XCLocalSwiftPackageReference "Vendor/FFmpegLocal" */;
+			productName = Libavformat;
+		};
+		F0A100000000000000000013 /* Libavutil */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = F0A100000000000000000010 /* XCLocalSwiftPackageReference "Vendor/FFmpegLocal" */;
+			productName = Libavutil;
+		};
+/* End XCSwiftPackageProductDependency section */
 
 /* Begin XCBuildConfiguration section */
 		32C374F22F512B260049C823 /* Debug */ = {
@@ -276,8 +316,14 @@
 				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-lbz2",
+					"-liconv",
+					"-lz",
+				);
 				MACOSX_DEPLOYMENT_TARGET = 26.2;
-				MARKETING_VERSION = 1.0;
+				MARKETING_VERSION = 0.1;
 				PRODUCT_BUNDLE_IDENTIFIER = pwu.reactwatch;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
@@ -329,8 +375,14 @@
 				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-lbz2",
+					"-liconv",
+					"-lz",
+				);
 				MACOSX_DEPLOYMENT_TARGET = 26.2;
-				MARKETING_VERSION = 1.0;
+				MARKETING_VERSION = 0.1;
 				PRODUCT_BUNDLE_IDENTIFIER = pwu.reactwatch;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;

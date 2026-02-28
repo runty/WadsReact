@@ -9,6 +9,7 @@
 # Build outputs
 build/
 DerivedData/
+.build/
 
 # SwiftPM
 .swiftpm/
