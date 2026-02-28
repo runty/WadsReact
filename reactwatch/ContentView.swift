@@ -28,18 +28,28 @@ struct ContentView: View {
     @FocusState private var isEditingOffsetField: Bool
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
-    private let pipPadding = 16.0
+    private let pipHorizontalPadding = 16.0
+    private let pipTopPadding = 16.0
+    private let pipBottomPadding = 0.0
     private let pipMinSize = CGSize(width: 180, height: 101)
     private let pipDefaultSize = CGSize(width: 360, height: 202)
     private let mainVideoNudgePoints = 20.0
     private let controlCardCornerRadius = 14.0
 
     private var controlPanelSpacing: CGFloat {
-        horizontalSizeClass == .compact ? 12 : 10
+        horizontalSizeClass == .compact ? 10 : 8
     }
 
     private var isManipulatingPiP: Bool {
         isDraggingPiP || isResizingPiP
+    }
+
+    private var headerTopInset: CGFloat {
+#if os(iOS)
+        UIDevice.current.userInterfaceIdiom == .pad ? 8 : 0
+#else
+        0
+#endif
     }
 
     private var importTypes: [UTType] {
@@ -71,13 +81,9 @@ struct ContentView: View {
     }
 
     private func secondsLabel(_ value: Double) -> String {
-        let magnitude = value < 1 ? String(format: "%.1f", value) : String(format: "%.0f", value)
+        let magnitude = value < 1 ? String(format: "%.2f", value) : String(format: "%.0f", value)
         let unit = value == 1 ? "second" : "seconds"
         return "\(magnitude) \(unit)"
-    }
-
-    private func percentLabel(_ value: Double) -> String {
-        "\(Int((value * 100).rounded()))%"
     }
 
     private func formattedOffset(_ value: Double) -> String {
@@ -96,6 +102,11 @@ struct ContentView: View {
 
         model.setReactionOffset(to: parsed)
         offsetInput = formattedOffset(model.reactionOffsetSeconds)
+    }
+
+    private func presentImporter(for kind: DualPlayerViewModel.VideoKind) {
+        activeImportKind = kind
+        importerPresented = true
     }
 
     var body: some View {
@@ -122,6 +133,7 @@ struct ContentView: View {
                 }
             }
             .padding(isTheaterMode ? 0 : 16)
+            .padding(.top, isTheaterMode ? 0 : headerTopInset)
         }
         .overlay(alignment: .bottomTrailing) {
             if !isTheaterMode {
@@ -176,15 +188,13 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 12) {
                 Button {
-                    activeImportKind = .primary
-                    importerPresented = true
+                    presentImporter(for: .primary)
                 } label: {
                     Label("Choose Show/Movie", systemImage: "film")
                 }
 
                 Button {
-                    activeImportKind = .reaction
-                    importerPresented = true
+                    presentImporter(for: .reaction)
                 } label: {
                     Label("Choose Reaction", systemImage: "person.2")
                 }
@@ -260,6 +270,7 @@ struct ContentView: View {
                     ZStack(alignment: .topLeading) {
                         theaterMainPlayer(in: geometry.size)
                         theaterMainPositionControls(in: geometry.size)
+                        theaterExitButton
 
                         if model.hasReactionVideo {
                             theaterReactionPiP(in: geometry.size)
@@ -274,6 +285,7 @@ struct ContentView: View {
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .ignoresSafeArea()
             } else {
                 splitPlayers
             }
@@ -288,7 +300,8 @@ struct ContentView: View {
                         title: "Show / Movie",
                         fileName: model.primaryTitle,
                         player: model.primaryPlayer,
-                        loaded: model.hasPrimaryVideo
+                        loaded: model.hasPrimaryVideo,
+                        onEmptyTap: { presentImporter(for: .primary) }
                     )
 
                     reactionPane
@@ -299,7 +312,8 @@ struct ContentView: View {
                         title: "Show / Movie",
                         fileName: model.primaryTitle,
                         player: model.primaryPlayer,
-                        loaded: model.hasPrimaryVideo
+                        loaded: model.hasPrimaryVideo,
+                        onEmptyTap: { presentImporter(for: .primary) }
                     )
 
                     reactionPane
@@ -323,33 +337,19 @@ struct ContentView: View {
                     .fill(.black.opacity(0.55))
                 Text("No show/movie selected")
                     .foregroundStyle(.white)
+                Rectangle()
+                    .fill(.clear)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        presentImporter(for: .primary)
+                    }
             }
         }
         .frame(width: container.width, height: theaterMainHeight(in: container), alignment: .top)
         .offset(y: mainVideoVerticalOffset)
-        .overlay(alignment: .topTrailing) {
-            if isTheaterMode {
-                Button {
-                    isTheaterMode = false
-                } label: {
-                    Label("Exit Theatre Mode", systemImage: "xmark.circle.fill")
-                }
-                .labelStyle(.iconOnly)
-                .buttonStyle(.plain)
-                .font(.title2)
-                .padding(12)
-                .foregroundStyle(.white.opacity(0.9))
-            }
-        }
     }
 
-    private func theaterMainPositionControlsTop(in container: CGSize) -> CGFloat {
-        let desiredTop = theaterMainHeight(in: container) + 8 + mainVideoVerticalOffset
-        let maxVisibleTop = max(8, container.height - 72)
-        return min(max(desiredTop, 8), maxVisibleTop)
-    }
-
-    private func theaterMainPositionControls(in container: CGSize) -> some View {
+    private func theaterMainPositionControls(in _: CGSize) -> some View {
         VStack(spacing: 4) {
             theaterMainNudgeButton(systemImage: "chevron.up") {
                 mainVideoVerticalOffset -= mainVideoNudgePoints
@@ -359,15 +359,31 @@ struct ContentView: View {
                 mainVideoVerticalOffset += mainVideoNudgePoints
             }
         }
-        .padding(.leading, 8)
-        .padding(.top, theaterMainPositionControlsTop(in: container))
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+        .padding(.leading, 12)
+        .padding(.bottom, 14)
+    }
+
+    private var theaterExitButton: some View {
+        Button {
+            isTheaterMode = false
+        } label: {
+            Label("Exit Theatre Mode", systemImage: "xmark.circle.fill")
+        }
+        .labelStyle(.iconOnly)
+        .buttonStyle(.plain)
+        .font(.title2)
+        .foregroundStyle(.white.opacity(0.9))
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+        .padding(.trailing, 12)
+        .padding(.bottom, 14)
     }
 
     private func theaterMainNudgeButton(systemImage: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: systemImage)
-                .font(.system(size: 12, weight: .semibold))
-                .frame(width: 28, height: 28)
+                .font(.system(size: 15, weight: .semibold))
+                .frame(width: 36, height: 36)
                 .foregroundStyle(.white)
                 .background(.ultraThinMaterial, in: Circle())
                 .overlay {
@@ -456,21 +472,36 @@ struct ContentView: View {
     private var reactionPiPSurface: some View {
         Group {
             if model.isReactionYouTube, let videoID = model.reactionYouTubeVideoID {
-                YouTubePlayerSurfaceView(bridge: model.reactionYouTubeBridge, videoID: videoID)
+                YouTubePlayerSurfaceView(
+                    bridge: model.reactionYouTubeBridge,
+                    videoID: videoID,
+                    showsNativeControls: false
+                )
             } else {
                 PlayerSurfaceView(player: model.reactionPlayer)
             }
         }
     }
 
-    private func videoPane(title: String, fileName: String, player: AVPlayer, loaded: Bool) -> some View {
+    private func videoPane(
+        title: String,
+        fileName: String,
+        player: AVPlayer,
+        loaded: Bool,
+        onEmptyTap: (() -> Void)? = nil
+    ) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(title)
-                .font(.headline)
-            Text(fileName)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
+            HStack(alignment: .lastTextBaseline, spacing: 8) {
+                Text(title)
+                    .font(.headline)
+                    .fixedSize(horizontal: true, vertical: false)
+
+                Text(fileName)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
 
             ZStack {
                 VideoPlayer(player: player)
@@ -481,6 +512,15 @@ struct ContentView: View {
                         .fill(.black.opacity(0.55))
                     Text("No video selected")
                         .foregroundStyle(.white)
+
+                    if let onEmptyTap {
+                        Rectangle()
+                            .fill(.clear)
+                            .contentShape(RoundedRectangle(cornerRadius: 12))
+                            .onTapGesture {
+                                onEmptyTap()
+                            }
+                    }
                 }
             }
             .frame(minHeight: 220)
@@ -490,15 +530,24 @@ struct ContentView: View {
 
     private func youtubeVideoPane(title: String, fileName: String, videoID: String, loaded: Bool) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(title)
-                .font(.headline)
-            Text(fileName)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
+            HStack(alignment: .lastTextBaseline, spacing: 8) {
+                Text(title)
+                    .font(.headline)
+                    .fixedSize(horizontal: true, vertical: false)
+
+                Text(fileName)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
 
             ZStack {
-                YouTubePlayerSurfaceView(bridge: model.reactionYouTubeBridge, videoID: videoID)
+                YouTubePlayerSurfaceView(
+                    bridge: model.reactionYouTubeBridge,
+                    videoID: videoID,
+                    showsNativeControls: true
+                )
                     .clipShape(RoundedRectangle(cornerRadius: 12))
 
                 if !loaded {
@@ -521,8 +570,8 @@ struct ContentView: View {
         let size = clampedPiPSize(pipDefaultSize, in: container)
         pipSize = size
         pipOrigin = CGPoint(
-            x: container.width - size.width - pipPadding,
-            y: container.height - size.height - pipPadding
+            x: container.width - size.width - pipHorizontalPadding,
+            y: container.height - size.height - pipBottomPadding
         )
         hasInitializedPiP = true
         revealPiPControls()
@@ -535,8 +584,8 @@ struct ContentView: View {
     }
 
     private func clampedPiPSize(_ proposed: CGSize, in container: CGSize) -> CGSize {
-        let maxWidth = max(pipMinSize.width, container.width - (pipPadding * 2))
-        let maxHeight = max(pipMinSize.height, container.height - (pipPadding * 2))
+        let maxWidth = max(pipMinSize.width, container.width - (pipHorizontalPadding * 2))
+        let maxHeight = max(pipMinSize.height, container.height - pipTopPadding - pipBottomPadding)
         return CGSize(
             width: min(max(proposed.width, pipMinSize.width), maxWidth),
             height: min(max(proposed.height, pipMinSize.height), maxHeight)
@@ -544,11 +593,23 @@ struct ContentView: View {
     }
 
     private func clampedPiPOrigin(_ proposed: CGPoint, size: CGSize, in container: CGSize) -> CGPoint {
-        let maxX = max(pipPadding, container.width - size.width - pipPadding)
-        let maxY = max(pipPadding, container.height - size.height - pipPadding)
+#if os(iOS)
+        // Allow partial off-screen placement on iOS while keeping enough visible area to grab.
+        let minVisibleWidth = min(72.0, size.width)
+        let minVisibleHeight = min(72.0, size.height)
+        let minX = minVisibleWidth - size.width
+        let maxX = container.width - minVisibleWidth
+        let minY = minVisibleHeight - size.height
+        let maxY = container.height - minVisibleHeight
+#else
+        let minX = pipHorizontalPadding
+        let maxX = max(pipHorizontalPadding, container.width - size.width - pipHorizontalPadding)
+        let minY = pipTopPadding
+        let maxY = max(pipTopPadding, container.height - size.height - pipBottomPadding)
+#endif
         return CGPoint(
-            x: min(max(proposed.x, pipPadding), maxX),
-            y: min(max(proposed.y, pipPadding), maxY)
+            x: min(max(proposed.x, minX), maxX),
+            y: min(max(proposed.y, minY), maxY)
         )
     }
 
@@ -678,7 +739,7 @@ struct ContentView: View {
 
     private func compactControlCard<Content: View>(@ViewBuilder content: () -> Content) -> some View {
         content()
-            .padding(10)
+            .padding(8)
             .background(
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .fill(.regularMaterial)
@@ -701,10 +762,7 @@ struct ContentView: View {
     }
 
     private var transport: some View {
-        VStack(spacing: 7) {
-            sectionHeader("Transport", systemImage: "play.square.fill", color: .blue)
-                .frame(maxWidth: .infinity, alignment: .leading)
-
+        VStack(spacing: 4) {
             Slider(
                 value: Binding(
                     get: { displayedTime },
@@ -723,17 +781,15 @@ struct ContentView: View {
                 }
             )
 
-            HStack {
+            HStack(spacing: 10) {
                 Text(model.formatTime(displayedTime))
                     .monospacedDigit()
-                Spacer()
-                Text(model.formatTime(model.durationSeconds))
-                    .monospacedDigit()
-            }
-            .font(.caption)
-            .foregroundStyle(.secondary)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .frame(minWidth: 54, alignment: .leading)
 
-            HStack(spacing: 14) {
+                Spacer(minLength: 4)
+
                 Button {
                     model.skip(by: -10)
                 } label: {
@@ -749,7 +805,7 @@ struct ContentView: View {
                         .font(.body.weight(.semibold))
                 }
                 .buttonStyle(.borderedProminent)
-                .controlSize(.regular)
+                .controlSize(.small)
 
                 Button {
                     model.skip(by: 10)
@@ -758,17 +814,21 @@ struct ContentView: View {
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
+
+                Spacer(minLength: 4)
+
+                Text(model.formatTime(model.durationSeconds))
+                    .monospacedDigit()
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .frame(minWidth: 54, alignment: .trailing)
             }
         }
     }
 
     private var settings: some View {
         VStack(alignment: .leading, spacing: 10) {
-            sectionHeader("Sync Offset", systemImage: "link", color: .orange)
-
-            Text("Set the reaction delay directly, then nudge with the quick buttons.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            sectionHeader("Reaction Offset", systemImage: "link", color: .orange)
 
             HStack(spacing: 10) {
                 Text("Offset")
@@ -870,15 +930,11 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 10) {
             sectionHeader("Audio Levels", systemImage: "speaker.wave.2.fill", color: .green)
 
-            Text("Adjust show and reaction audio independently.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
             HStack(spacing: 10) {
                 Label("Show", systemImage: "film")
                     .lineLimit(1)
                     .minimumScaleFactor(0.9)
-                    .frame(width: 96, alignment: .leading)
+                    .frame(width: 118, alignment: .leading)
 
                 Slider(
                     value: Binding(
@@ -889,10 +945,6 @@ struct ContentView: View {
                     ),
                     in: 0...model.maxVolume
                 )
-
-                Text(percentLabel(model.primaryVolume))
-                    .monospacedDigit()
-                    .frame(width: 44, alignment: .trailing)
 
                 Button {
                     model.togglePrimaryMute()
@@ -906,7 +958,7 @@ struct ContentView: View {
                 Label("Reaction", systemImage: "person.2")
                     .lineLimit(1)
                     .minimumScaleFactor(0.9)
-                    .frame(width: 96, alignment: .leading)
+                    .frame(width: 118, alignment: .leading)
 
                 Slider(
                     value: Binding(
@@ -917,10 +969,6 @@ struct ContentView: View {
                     ),
                     in: 0...model.maxVolume
                 )
-
-                Text(percentLabel(model.reactionVolume))
-                    .monospacedDigit()
-                    .frame(width: 44, alignment: .trailing)
 
                 Button {
                     model.toggleReactionMute()

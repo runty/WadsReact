@@ -55,6 +55,9 @@ final class DualPlayerViewModel: ObservableObject {
     private var securityScopedURLs: [URL] = []
     private var currentLegibleGroup: AVMediaSelectionGroup?
     private var legibleOptionByID: [String: AVMediaSelectionOption] = [:]
+    private var playbackStatusCancellables: Set<AnyCancellable> = []
+    private var lastPrimaryPlaybackStatus: PlaybackStatus = .paused
+    private var lastReactionPlaybackStatus: PlaybackStatus = .paused
     private var reactionYouTubeState: YouTubePlayerBridge.PlayerState = .unstarted
     private var reactionYouTubeCurrentSeconds = 0.0
     private var reactionYouTubeDurationSeconds = 0.0
@@ -67,8 +70,8 @@ final class DualPlayerViewModel: ObservableObject {
     private let maxRateAdjustment = 0.06
     private let rateCorrectionGain = 0.35
     private let correctionSeekTolerance = CMTime(seconds: 0.02, preferredTimescale: 600)
-    private let youTubeResyncThresholdSeconds = 0.25
-    private let minimumYouTubeCorrectionInterval = 0.4
+    private let youTubeResyncThresholdSeconds = 1.2
+    private let minimumYouTubeCorrectionInterval = 2.5
 
     init() {
         configurePlayersForSync()
@@ -405,6 +408,22 @@ final class DualPlayerViewModel: ObservableObject {
             }
         }
 
+        primaryPlayer.publisher(for: \.timeControlStatus)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                guard let self else { return }
+                self.synchronizeStateFromTick()
+            }
+            .store(in: &playbackStatusCancellables)
+
+        reactionPlayer.publisher(for: \.timeControlStatus)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                guard let self else { return }
+                self.synchronizeStateFromTick()
+            }
+            .store(in: &playbackStatusCancellables)
+
         let endObserver = NotificationCenter.default.addObserver(
             forName: .AVPlayerItemDidPlayToEndTime,
             object: nil,
@@ -489,6 +508,8 @@ final class DualPlayerViewModel: ObservableObject {
         let drift = desiredReactionSeconds - reactionSecondsNow
 
         if isReactionYouTube {
+            // YouTube time callbacks are quantized and seek operations are expensive.
+            // Keep correction coarse so playback stays smooth.
             guard abs(drift) >= youTubeResyncThresholdSeconds else {
                 return
             }
@@ -534,7 +555,42 @@ final class DualPlayerViewModel: ObservableObject {
     }
 
     private func refreshPlayingState() {
-        isPlaying = isPrimaryActuallyPlaying || isReactionActuallyPlaying
+        let primaryStatus = primaryPlaybackStatus
+        let reactionStatus = reactionPlaybackStatus
+
+        maybeFinalizeOffsetForIndependentPause(
+            previousPrimary: lastPrimaryPlaybackStatus,
+            previousReaction: lastReactionPlaybackStatus,
+            currentPrimary: primaryStatus,
+            currentReaction: reactionStatus
+        )
+
+        lastPrimaryPlaybackStatus = primaryStatus
+        lastReactionPlaybackStatus = reactionStatus
+        isPlaying = primaryStatus == .playing || reactionStatus == .playing
+    }
+
+    private func maybeFinalizeOffsetForIndependentPause(
+        previousPrimary: PlaybackStatus,
+        previousReaction: PlaybackStatus,
+        currentPrimary: PlaybackStatus,
+        currentReaction: PlaybackStatus
+    ) {
+        guard hasPrimaryVideo, hasReactionVideo else {
+            return
+        }
+
+        guard currentPrimary == .paused, currentReaction == .paused else {
+            return
+        }
+
+        let wasOneSidePlaying = (previousPrimary == .playing && previousReaction != .playing)
+            || (previousReaction == .playing && previousPrimary != .playing)
+        guard wasOneSidePlaying else {
+            return
+        }
+
+        applyOffsetFromCurrentFramesWithoutRealign()
     }
 
     private func adjustOffsetForSinglePlayerPause() {
@@ -550,6 +606,17 @@ final class DualPlayerViewModel: ObservableObject {
             return
         }
 
+        let primarySeconds = primaryPlayer.currentTime().seconds
+        let reactionSeconds = currentReactionSeconds
+
+        guard primarySeconds.isFinite, reactionSeconds.isFinite else {
+            return
+        }
+
+        reactionOffsetSeconds = clampReactionOffset(primarySeconds - reactionSeconds)
+    }
+
+    private func applyOffsetFromCurrentFramesWithoutRealign() {
         let primarySeconds = primaryPlayer.currentTime().seconds
         let reactionSeconds = currentReactionSeconds
 
@@ -686,11 +753,6 @@ final class DualPlayerViewModel: ObservableObject {
         reactionYouTubeBridge.onReady = { [weak self] in
             guard let self else { return }
             self.reactionYouTubeBridge.setVolume(self.reactionVolume)
-            if self.hasPrimaryVideo, self.hasReactionVideo, self.isPlaying {
-                self.startSynchronizedPlayback()
-            } else if self.isPlaying, self.hasReactionVideo {
-                self.playReaction()
-            }
         }
 
         reactionYouTubeBridge.onStateChange = { [weak self] state in
@@ -739,6 +801,9 @@ final class DualPlayerViewModel: ObservableObject {
         reactionPlayer.pause()
         reactionPlayer.replaceCurrentItem(with: nil)
 
+        let primaryReferenceSeconds = hasPrimaryVideo ? primaryPlayer.currentTime().seconds : 0
+        let finitePrimaryReference = primaryReferenceSeconds.isFinite ? max(primaryReferenceSeconds, 0) : 0
+
         reactionYouTubeCurrentSeconds = 0
         reactionYouTubeDurationSeconds = 0
         reactionYouTubeState = .unstarted
@@ -747,13 +812,11 @@ final class DualPlayerViewModel: ObservableObject {
         hasReactionVideo = true
         reactionYouTubeBridge.load(videoID: videoID)
         reactionYouTubeBridge.setVolume(reactionVolume)
+        seekReaction(to: reactionSeconds(forPrimarySeconds: finitePrimaryReference))
+        pauseReaction()
 
         updateTimeline()
-        if isPlaying {
-            play()
-        } else {
-            realignReactionToPrimary()
-        }
+        refreshPlayingState()
     }
 
     private func clearYouTubeReactionState() {

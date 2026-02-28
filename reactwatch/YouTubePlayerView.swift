@@ -72,9 +72,14 @@ final class YouTubePlayerBridge {
 struct YouTubePlayerSurfaceView: View {
     let bridge: YouTubePlayerBridge
     let videoID: String
+    let showsNativeControls: Bool
 
     var body: some View {
-        PlatformYouTubePlayerRepresentable(bridge: bridge, videoID: videoID)
+        PlatformYouTubePlayerRepresentable(
+            bridge: bridge,
+            videoID: videoID,
+            showsNativeControls: showsNativeControls
+        )
             .background(Color.black)
             .clipped()
     }
@@ -93,13 +98,15 @@ private final class YouTubePlayerCoordinator: NSObject, WKScriptMessageHandler, 
     private var currentVideoID: String?
     private var pendingVideoID: String?
     private var pendingCommands: [YouTubePlayerBridge.Command] = []
+    private var showsNativeControls: Bool
     private var isReady = false
 
     private let messageHandlerName = "ytBridge"
 
-    init(bridge: YouTubePlayerBridge, initialVideoID: String) {
+    init(bridge: YouTubePlayerBridge, initialVideoID: String, showsNativeControls: Bool) {
         self.bridge = bridge
         pendingVideoID = initialVideoID
+        self.showsNativeControls = showsNativeControls
         super.init()
 
         bridge.commandSink = { [weak self] command in
@@ -129,7 +136,11 @@ private final class YouTubePlayerCoordinator: NSObject, WKScriptMessageHandler, 
 
         let initialID = pendingVideoID ?? currentVideoID ?? ""
         let identityURL = Self.embedderIdentityURL()
-        let html = Self.playerHTML(initialVideoID: initialID, embedderIdentityURL: identityURL)
+        let html = Self.playerHTML(
+            initialVideoID: initialID,
+            embedderIdentityURL: identityURL,
+            showsNativeControls: showsNativeControls
+        )
         webView.loadHTMLString(html, baseURL: identityURL)
     }
 
@@ -138,6 +149,18 @@ private final class YouTubePlayerCoordinator: NSObject, WKScriptMessageHandler, 
             return
         }
         handle(.load(videoID))
+    }
+
+    func updateControls(_ showsNativeControls: Bool) {
+        guard self.showsNativeControls != showsNativeControls else {
+            return
+        }
+        self.showsNativeControls = showsNativeControls
+        isReady = false
+        pendingCommands.removeAll(keepingCapacity: true)
+        if let webView {
+            connect(webView: webView)
+        }
     }
 
     private func handle(_ command: YouTubePlayerBridge.Command) {
@@ -256,9 +279,14 @@ private final class YouTubePlayerCoordinator: NSObject, WKScriptMessageHandler, 
             .replacingOccurrences(of: "'", with: "\\'")
     }
 
-    private static func playerHTML(initialVideoID: String, embedderIdentityURL: URL) -> String {
+    private static func playerHTML(
+        initialVideoID: String,
+        embedderIdentityURL: URL,
+        showsNativeControls: Bool
+    ) -> String {
         let escapedVideoID = escapeForSingleQuotedJS(sanitizeVideoID(initialVideoID))
         let escapedOrigin = escapeForSingleQuotedJS(embedderIdentityURL.absoluteString)
+        let controlsValue = showsNativeControls ? "1" : "0"
         return """
         <!doctype html>
         <html>
@@ -293,7 +321,7 @@ private final class YouTubePlayerCoordinator: NSObject, WKScriptMessageHandler, 
                         videoId: reactwatchPendingVideoId,
                         playerVars: {
                             autoplay: 0,
-                            controls: 0,
+                            controls: \(controlsValue),
                             enablejsapi: 1,
                             rel: 0,
                             fs: 0,
@@ -334,8 +362,8 @@ private final class YouTubePlayerCoordinator: NSObject, WKScriptMessageHandler, 
 
                 window.reactwatchLoadVideo = function(videoId) {
                     reactwatchPendingVideoId = videoId;
-                    if (reactwatchPlayer && typeof reactwatchPlayer.loadVideoById === 'function') {
-                        reactwatchPlayer.loadVideoById({ videoId: videoId, startSeconds: 0, suggestedQuality: 'default' });
+                    if (reactwatchPlayer && typeof reactwatchPlayer.cueVideoById === 'function') {
+                        reactwatchPlayer.cueVideoById({ videoId: videoId, startSeconds: 0, suggestedQuality: 'default' });
                     }
                 };
 
@@ -386,9 +414,14 @@ import UIKit
 private struct PlatformYouTubePlayerRepresentable: UIViewRepresentable {
     let bridge: YouTubePlayerBridge
     let videoID: String
+    let showsNativeControls: Bool
 
     func makeCoordinator() -> YouTubePlayerCoordinator {
-        YouTubePlayerCoordinator(bridge: bridge, initialVideoID: videoID)
+        YouTubePlayerCoordinator(
+            bridge: bridge,
+            initialVideoID: videoID,
+            showsNativeControls: showsNativeControls
+        )
     }
 
     func makeUIView(context: Context) -> WKWebView {
@@ -399,6 +432,7 @@ private struct PlatformYouTubePlayerRepresentable: UIViewRepresentable {
 
     func updateUIView(_ webView: WKWebView, context: Context) {
         context.coordinator.updateVideoID(videoID)
+        context.coordinator.updateControls(showsNativeControls)
     }
 
     private func makeConfiguredWebView() -> WKWebView {
@@ -417,9 +451,14 @@ import AppKit
 private struct PlatformYouTubePlayerRepresentable: NSViewRepresentable {
     let bridge: YouTubePlayerBridge
     let videoID: String
+    let showsNativeControls: Bool
 
     func makeCoordinator() -> YouTubePlayerCoordinator {
-        YouTubePlayerCoordinator(bridge: bridge, initialVideoID: videoID)
+        YouTubePlayerCoordinator(
+            bridge: bridge,
+            initialVideoID: videoID,
+            showsNativeControls: showsNativeControls
+        )
     }
 
     func makeNSView(context: Context) -> WKWebView {
@@ -430,6 +469,7 @@ private struct PlatformYouTubePlayerRepresentable: NSViewRepresentable {
 
     func updateNSView(_ webView: WKWebView, context: Context) {
         context.coordinator.updateVideoID(videoID)
+        context.coordinator.updateControls(showsNativeControls)
     }
 
     private func makeConfiguredWebView() -> WKWebView {
